@@ -395,7 +395,11 @@ bool DefaultCertValidator::matchSubjectAltName(
   }
   for (const auto& config_san_matcher : subject_alt_name_matchers) {
     for (const GENERAL_NAME* general_name : san_names.get()) {
-      if (config_san_matcher->match(general_name, stream_info)) {
+      if (stream_info) {
+        if (config_san_matcher->match(general_name, stream_info.ref())) {
+          return true;
+        }
+      } else if (config_san_matcher->match(general_name)) {
         return true;
       }
     }

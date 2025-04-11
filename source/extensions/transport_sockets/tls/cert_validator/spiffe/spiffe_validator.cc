@@ -418,7 +418,7 @@ bool SPIFFEValidator::matchSubjectAltName(X509& leaf_cert) {
 
   for (const GENERAL_NAME* general_name : san_names.get()) {
     for (const auto& config_san_matcher : subject_alt_name_matchers_) {
-      if (config_san_matcher->match(general_name, absl::nullopt)) {
+      if (config_san_matcher->match(general_name)) {
         return true;
       }
     }
