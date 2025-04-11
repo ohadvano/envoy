@@ -23,9 +23,7 @@ namespace Ssl {
  */
 class SanMatcher {
 public:
-  virtual bool
-  match(GENERAL_NAME const*,
-        const Network::TransportSocketOptions* transport_socket_options = nullptr) const PURE;
+  virtual bool match(GENERAL_NAME const*, OptRef<const StreamInfo::StreamInfo>) const PURE;
   virtual ~SanMatcher() = default;
 };
 
@@ -41,9 +39,7 @@ using Ssl::SanMatcherPtr;
 
 class StringSanMatcher : public SanMatcher {
 public:
-  bool
-  match(const GENERAL_NAME* general_name,
-        const Network::TransportSocketOptions* transport_socket_options = nullptr) const override;
+  bool match(const GENERAL_NAME* general_name, OptRef<const StreamInfo::StreamInfo>) const override;
   ~StringSanMatcher() override = default;
 
   StringSanMatcher(int general_name_type, envoy::type::matcher::v3::StringMatcher matcher,
@@ -69,9 +65,7 @@ private:
 // and the DNS matching semantics must be followed.
 class DnsExactStringSanMatcher : public SanMatcher {
 public:
-  bool
-  match(const GENERAL_NAME* general_name,
-        const Network::TransportSocketOptions* transport_socket_options = nullptr) const override;
+  bool match(const GENERAL_NAME* general_name, OptRef<const StreamInfo::StreamInfo>) const override;
   ~DnsExactStringSanMatcher() override = default;
 
   DnsExactStringSanMatcher(absl::string_view dns_exact_match) : dns_exact_match_(dns_exact_match) {}

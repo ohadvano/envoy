@@ -38,8 +38,7 @@ public:
   ~Matcher() override;
 
   // Envoy::Regex::CompiledMatcher
-  bool match(absl::string_view value,
-             OptRef<const StringMatcher::Context> context = absl::nullopt) const override;
+  bool match(absl::string_view value) const override;
   std::string replaceAll(absl::string_view value, absl::string_view substitution) const override;
 
   // Envoy::Matcher::InputMatcher

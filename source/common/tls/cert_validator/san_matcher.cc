@@ -14,9 +14,8 @@ namespace Extensions {
 namespace TransportSockets {
 namespace Tls {
 
-bool StringSanMatcher::match(
-    const GENERAL_NAME* general_name,
-    const Network::TransportSocketOptions* transport_socket_options) const {
+bool StringSanMatcher::match(const GENERAL_NAME* general_name,
+                             OptRef<const StreamInfo::StreamInfo> stream_info) const {
   if (general_name->type != general_name_type_) {
     return false;
   }
@@ -26,12 +25,16 @@ bool StringSanMatcher::match(
     }
   }
 
-  Matchers::StringMatcher::Context context{makeOptRefFromPtr(transport_socket_options)};
-  return matcher_.match(Utility::generalNameAsString(general_name), makeOptRef(context));
+  if (stream_info) {
+    Matchers::StringMatcher::Context context{stream_info};
+    return matcher_.match(Utility::generalNameAsString(general_name), context);
+  }
+
+  return matcher_.match(Utility::generalNameAsString(general_name));
 }
 
 bool DnsExactStringSanMatcher::match(const GENERAL_NAME* general_name,
-                                     const Network::TransportSocketOptions*) const {
+                                     OptRef<const StreamInfo::StreamInfo>) const {
   if (general_name->type != GEN_DNS) {
     return false;
   }

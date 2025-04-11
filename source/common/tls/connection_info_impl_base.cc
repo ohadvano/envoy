@@ -223,7 +223,7 @@ bool ConnectionInfoImplBase::peerCertificateSanMatches(const Ssl::SanMatcher& ma
 
   if (sans != nullptr) {
     for (const GENERAL_NAME* san : sans.get()) {
-      if (matcher.match(san)) {
+      if (matcher.match(san, absl::nullopt)) {
         return true;
       }
     }
