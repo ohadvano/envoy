@@ -169,6 +169,12 @@ public:
   const Network::DrainableFilterChainSharedPtr& defaultFilterChain() const {
     return default_filter_chain_;
   }
+  bool isDiscoveredFilterChain(const std::string& filter_chain) const {
+    return dynamic_filter_chain_names_.contains(filter_chain);
+  }
+  bool filterChainExist(const std::string& filter_chain) const {
+    return filter_chain_names_.contains(filter_chain);
+  }
 
 private:
   absl::Status convertIPsToTries();
@@ -331,6 +337,10 @@ private:
 
   // Index filter chains by name, used by the matcher actions.
   FilterChainsByName filter_chains_by_name_;
+
+  absl::node_hash_set<std::string> filter_chain_names_;
+
+  absl::node_hash_set<std::string> dynamic_filter_chain_names_;
 };
 
 namespace FilterChain {

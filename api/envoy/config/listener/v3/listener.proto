@@ -128,6 +128,10 @@ message Listener {
     // .. note::
     //   This discovery service only supports ``AGGREGATED_GRPC`` API type.
     core.v3.ConfigSource config_source = 2;
+
+    // Allow listener to start without waiting for filter chains to be discovered.
+    // If set to true, the listener must contain at least one static filter chain configured.
+    bool start_listener_without_warming = 3;
   }
 
   reserved 14, 23;

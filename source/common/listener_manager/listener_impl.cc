@@ -21,6 +21,7 @@
 #include "source/common/listener_manager/active_raw_udp_listener_config.h"
 #include "source/common/listener_manager/filter_chain_manager_impl.h"
 #include "source/common/listener_manager/listener_manager_impl.h"
+#include "source/common/listener_manager/fcds_api.h"
 #include "source/common/network/connection_balancer_impl.h"
 #include "source/common/network/resolver_impl.h"
 #include "source/common/network/socket_option_factory.h"
@@ -70,7 +71,31 @@ bool shouldBindToPort(const envoy::config::listener::v3::Listener& config) {
   return PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, bind_to_port, true) &&
          PROTOBUF_GET_WRAPPED_OR_DEFAULT(config.deprecated_v1(), bind_to_port, true);
 }
+
+envoy::config::listener::v3::Listener
+stripFilterChains(const envoy::config::listener::v3::Listener& config) {
+  envoy::config::listener::v3::Listener stripped_config;
+  stripped_config.CopyFrom(config);
+  stripped_config.clear_filter_chains();
+  return stripped_config;
+}
+
 } // namespace
+
+FcdsApiPtr ListenerImpl::createFcdsSubscription(
+    const envoy::config::listener::v3::Listener::FcdsConfig& fcds_config) {
+  std::unique_ptr<FcdsApiImpl> subscription = std::make_unique<FcdsApiImpl>(
+      fcds_config.config_source(),
+      !fcds_config.name().empty() ? fcds_config.name() : name_, name_,
+      parent_.server_.clusterManager(), *dynamic_init_manager_,
+      listenerScope(), parent_, validation_visitor_);
+
+  if (!fcds_config.start_listener_without_warming()) {
+    dynamic_init_manager_->add(subscription->initTarget());
+  }
+
+  return std::move(subscription);
+}
 
 absl::StatusOr<std::unique_ptr<ListenSocketFactoryImpl>> ListenSocketFactoryImpl::create(
     ListenerComponentFactory& factory, Network::Address::InstanceConstSharedPtr address,
@@ -295,7 +320,7 @@ ListenerImpl::ListenerImpl(const envoy::config::listener::v3::Listener& config,
       per_connection_buffer_limit_bytes_(
           PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, per_connection_buffer_limit_bytes, 1024 * 1024)),
       listener_tag_(parent_.factory_->nextListenerTag()), name_(name),
-      added_via_api_(added_via_api), workers_started_(workers_started), hash_(hash),
+      added_via_api_(added_via_api), workers_started_(workers_started),
       tcp_backlog_size_(
           PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, tcp_backlog_size, ENVOY_TCP_BACKLOG_SIZE)),
       max_connections_to_accept_per_socket_event_(
@@ -306,11 +331,12 @@ ListenerImpl::ListenerImpl(const envoy::config::listener::v3::Listener& config,
                          : parent_.server_.messageValidationContext().staticValidationVisitor()),
       ignore_global_conn_limit_(config.ignore_global_conn_limit()),
       bypass_overload_manager_(config.bypass_overload_manager()),
+      config_maybe_without_filter_chains_(stripFilterChains(config)), hash_(hash),
       listener_init_target_(fmt::format("Listener-init-target {}", name),
                             [this]() { dynamic_init_manager_->initialize(local_init_watcher_); }),
       dynamic_init_manager_(std::make_unique<Init::ManagerImpl>(
           fmt::format("Listener-local-init-manager {} {}", name, hash))),
-      config_(config), version_info_(version_info),
+      version_info_(version_info),
       listener_filters_timeout_(
           PROTOBUF_GET_MS_OR_DEFAULT(config, listener_filters_timeout, 15000)),
       continue_on_listener_filters_timeout_(config.continue_on_listener_filters_timeout()),
@@ -433,7 +459,7 @@ ListenerImpl::ListenerImpl(ListenerImpl& origin,
       per_connection_buffer_limit_bytes_(
           PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, per_connection_buffer_limit_bytes, 1024 * 1024)),
       listener_tag_(origin.listener_tag_), name_(name), added_via_api_(added_via_api),
-      workers_started_(workers_started), hash_(hash),
+      workers_started_(workers_started),
       tcp_backlog_size_(
           PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, tcp_backlog_size, ENVOY_TCP_BACKLOG_SIZE)),
       max_connections_to_accept_per_socket_event_(
@@ -445,10 +471,11 @@ ListenerImpl::ListenerImpl(ListenerImpl& origin,
       ignore_global_conn_limit_(config.ignore_global_conn_limit()),
       bypass_overload_manager_(config.bypass_overload_manager()),
       // listener_init_target_ is not used during in place update because we expect server started.
+      config_maybe_without_filter_chains_(config), hash_(hash),
       listener_init_target_("", nullptr),
       dynamic_init_manager_(std::make_unique<Init::ManagerImpl>(
           fmt::format("Listener-local-init-manager {} {}", name, hash))),
-      config_(config), version_info_(version_info),
+      version_info_(version_info),
       listen_socket_options_list_(origin.listen_socket_options_list_),
       listener_filters_timeout_(
           PROTOBUF_GET_MS_OR_DEFAULT(config, listener_filters_timeout, 15000)),
@@ -483,6 +510,69 @@ ListenerImpl::ListenerImpl(ListenerImpl& origin,
     buildSocketOptions(config);
     buildOriginalDstListenerFilter(config);
     buildProxyProtocolListenerFilter(config);
+    open_connections_ = origin.open_connections_;
+  }
+}
+
+ListenerImpl::ListenerImpl(
+    ListenerImpl& origin,
+    const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+    const std::vector<std::string>& removed_filter_chains, const std::string& version_info,
+    ListenerManagerImpl& parent, bool workers_started, absl::Status& creation_status)
+    : parent_(parent), addresses_(origin.addresses_), socket_type_(origin.socket_type_),
+      bind_to_port_(origin.bind_to_port_), mptcp_enabled_(origin.mptcp_enabled_),
+      hand_off_restored_destination_connections_(origin.hand_off_restored_destination_connections_),
+      per_connection_buffer_limit_bytes_(origin.per_connection_buffer_limit_bytes_),
+      listener_tag_(origin.listener_tag_), name_(origin.name_), added_via_api_(origin.added_via_api_),
+      workers_started_(workers_started), tcp_backlog_size_(origin.tcp_backlog_size_),
+      max_connections_to_accept_per_socket_event_(origin.max_connections_to_accept_per_socket_event_),
+      validation_visitor_(
+          added_via_api_ ? parent_.server_.messageValidationContext().dynamicValidationVisitor()
+                         : parent_.server_.messageValidationContext().staticValidationVisitor()),
+      ignore_global_conn_limit_(origin.ignore_global_conn_limit_),
+      bypass_overload_manager_(origin.bypass_overload_manager_),
+      // config_(origin.createListenerConfigFromFilterChainUpdates(
+      //     added_filter_chains, removed_filter_chains, creation_status)),
+      // hash_(MessageUtil::hash(config_)),
+      // listener_init_target_ is not used during in place update because we expect server started.
+      listener_init_target_("", nullptr), // TODO
+      dynamic_init_manager_(std::make_unique<Init::ManagerImpl>(
+          fmt::format("Listener-local-init-manager {} {}", origin.name_, hash_))),
+      version_info_(version_info),
+      listen_socket_options_list_(origin.listen_socket_options_list_),
+      listener_filters_timeout_(origin.listener_filters_timeout_),
+      continue_on_listener_filters_timeout_(origin.continue_on_listener_filters_timeout_),
+      udp_listener_config_(origin.udp_listener_config_),
+      connection_balancers_(origin.connection_balancers_),
+      // Reuse the listener_factory_context_base_ from the origin listener because the filter chain
+      // only updates will not change the listener_factory_context_base_.
+      listener_factory_context_(std::make_shared<PerListenerFactoryContextImpl>(
+          origin.listener_factory_context_->listener_factory_context_base_, *this)),
+      filter_chain_manager_(std::make_unique<FilterChainManagerImpl>(
+          addresses_, origin.listener_factory_context_->parentFactoryContext(), initManager(),
+          *origin.filter_chain_manager_)),
+      reuse_port_(origin.reuse_port_),
+      local_init_watcher_(fmt::format("Listener-local-init-watcher {}", origin.name_),
+                          [this] {
+                            ASSERT(workers_started_);
+                            parent_.inPlaceFilterChainUpdate(*this);
+                          }),
+      transport_factory_context_(origin.transport_factory_context_),
+      quic_stat_names_(parent_.quicStatNames()),
+      missing_listener_config_stats_({ALL_MISSING_LISTENER_CONFIG_STATS(
+          POOL_COUNTER(listener_factory_context_->listenerScope()))}) {
+  RETURN_ONLY_IF_NOT_OK_REF(creation_status);
+  buildAccessLog(config_);
+  SET_AND_RETURN_IF_NOT_OK(validateConfig(), creation_status);
+  SET_AND_RETURN_IF_NOT_OK(createListenerFilterFactories(config_), creation_status);
+  SET_AND_RETURN_IF_NOT_OK(validateFilterChains(config_), creation_status);
+  SET_AND_RETURN_IF_NOT_OK(buildFilterChains(config_), creation_status);
+  SET_AND_RETURN_IF_NOT_OK(buildInternalListener(config_), creation_status);
+  if (socket_type_ == Network::Socket::Type::Stream) {
+    // Apply the options below only for TCP.
+    buildSocketOptions(config_);
+    buildOriginalDstListenerFilter(config_);
+    buildProxyProtocolListenerFilter(config_);
     open_connections_ = origin.open_connections_;
   }
 }
@@ -761,11 +851,12 @@ absl::Status
 ListenerImpl::validateFilterChains(const envoy::config::listener::v3::Listener& config) {
   if (config.filter_chains().empty() && !config.has_default_filter_chain() &&
       (socket_type_ == Network::Socket::Type::Stream ||
-       !udp_listener_config_->listener_factory_->isTransportConnectionless())) {
+       !udp_listener_config_->listener_factory_->isTransportConnectionless()) &&
+      !(config.has_fcds_config() && !config.fcds_config().start_listener_without_warming())) {
     // If we got here, this is a tcp listener or connection-oriented udp listener, so ensure there
     // is a filter chain specified
     return absl::InvalidArgumentError(
-        fmt::format("error adding listener '{}': no filter chains specified",
+        fmt::format("error adding listener '{}': no filter chains specified and no filter chain discovery",
                     absl::StrJoin(addresses_, ",", Network::AddressStrFormatter())));
   } else if (udp_listener_config_ != nullptr &&
              !udp_listener_config_->listener_factory_->isTransportConnectionless()) {
@@ -778,7 +869,7 @@ ListenerImpl::validateFilterChains(const envoy::config::listener::v3::Listener& 
                       "specified for connection oriented UDP listener",
                       absl::StrJoin(addresses_, ",", Network::AddressStrFormatter())));
     }
-  } else if ((!config.filter_chains().empty() || config.has_default_filter_chain()) &&
+  } else if ((!config.filter_chains().empty() || config.has_default_filter_chain() || config.has_fcds_config()) &&
              udp_listener_config_ != nullptr &&
              udp_listener_config_->listener_factory_->isTransportConnectionless()) {
 
@@ -978,6 +1069,10 @@ bool ListenerImpl::createQuicListenerFilterChain(Network::QuicListenerFilterMana
   return false;
 }
 
+void ListenerImpl::dumpConfig(ProtobufWkt::Any* dump) const {
+  dump->PackFrom(config_maybe_without_filter_chains_);
+}
+
 void ListenerImpl::debugLog(const std::string& message) {
   UNREFERENCED_PARAMETER(message);
   ENVOY_LOG(debug, "{}: name={}, hash={}, tag={}, address={}", message, name_, hash_, listener_tag_,
@@ -1008,7 +1103,7 @@ ListenerImpl::~ListenerImpl() {
 Init::Manager& ListenerImpl::initManager() { return *dynamic_init_manager_; }
 
 absl::Status ListenerImpl::addSocketFactory(Network::ListenSocketFactoryPtr&& socket_factory) {
-  RETURN_IF_NOT_OK(buildConnectionBalancer(config(), *socket_factory->localAddress()));
+  RETURN_IF_NOT_OK(buildConnectionBalancer(config_, *socket_factory->localAddress()));
   if (buildUdpListenerWorkerRouter(*socket_factory->localAddress(),
                                    parent_.server_.options().concurrency())) {
     parent_.server_.hotRestart().registerUdpForwardingListener(socket_factory->localAddress(),
@@ -1029,16 +1124,16 @@ bool ListenerImpl::supportUpdateFilterChain(const envoy::config::listener::v3::L
   // Full listener update currently rejects tcp listener having 0 filter chain.
   // In place filter chain update could survive under zero filter chain but we should keep the
   // same behavior for now. This also guards the below filter chain access.
-  if (new_config.filter_chains_size() == 0) {
+  if (new_config.filter_chains_size() == 0 && !new_config.has_fcds_config()) {
     return false;
   }
 
   // See buildProxyProtocolListenerFilter().
-  if (usesProxyProto(config()) ^ usesProxyProto(new_config)) {
+  if (usesProxyProto(config_) ^ usesProxyProto(new_config)) {
     return false;
   }
 
-  if (ListenerMessageUtil::filterChainOnlyChange(config(), new_config)) {
+  if (ListenerMessageUtil::filterChainOnlyChange(config_, new_config)) {
     // We need to calculate the reuse port's default value then ensure whether it is changed or not.
     // Since reuse port's default value isn't the YAML bool field default value. When
     // `enable_reuse_port` is specified, `ListenerMessageUtil::filterChainOnlyChange` use the YAML
@@ -1059,6 +1154,18 @@ ListenerImpl::newListenerWithFilterChain(const envoy::config::listener::v3::List
                                                added_via_api_,
                                                /* new new workers started state */ workers_started,
                                                /* use new hash */ hash, creation_status));
+  RETURN_IF_NOT_OK(creation_status);
+  return ret;
+}
+
+absl::StatusOr<std::unique_ptr<ListenerImpl>>
+ListenerImpl::newListenerWithFilterChain(
+    const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+    const std::vector<std::string>& removed_filter_chains, bool workers_started) {
+  absl::Status creation_status = absl::OkStatus();
+  // Use WrapUnique since the constructor is private.
+  auto ret = absl::WrapUnique(new ListenerImpl(*this, added_filter_chains, removed_filter_chains,
+      version_info_, parent_, workers_started, creation_status));
   RETURN_IF_NOT_OK(creation_status);
   return ret;
 }
@@ -1151,7 +1258,7 @@ bool ListenerImpl::hasCompatibleAddress(const ListenerImpl& other) const {
   }
 
   // Third, check if the listener has the same socket options.
-  return ListenerMessageUtil::socketOptionsEqual(config(), other.config());
+  return ListenerMessageUtil::socketOptionsEqual(config_, other.config_);
 }
 
 bool ListenerImpl::hasDuplicatedAddress(const ListenerImpl& other) const {
@@ -1187,6 +1294,48 @@ void ListenerImpl::closeAllSockets() {
   for (auto& socket_factory : socket_factories_) {
     socket_factory->closeAllSockets();
   }
+}
+
+envoy::config::listener::v3::Listener
+ListenerImpl::createListenerConfigFromFilterChainUpdates(
+    const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+    const std::vector<std::string>& removed_filter_chains,absl::Status& creation_status) {
+  // Create a new listener config starting with the current config
+  envoy::config::listener::v3::Listener new_config = config_;
+  auto* filter_chains = new_config.mutable_filter_chains();
+
+  absl::node_hash_set<std::string> filter_chains_to_remove;
+  for (const auto& filter_chain : removed_filter_chains) {
+    filter_chains_to_remove.insert(filter_chain);
+  }
+
+  for (auto it = filter_chains->begin(); it != filter_chains->end();) {
+    const auto& remove_name = it->name();
+    if (filter_chains_to_remove.contains(remove_name)) {
+      if (!filter_chain_manager_->isDiscoveredFilterChain(remove_name)) {
+        creation_status = absl::InvalidArgumentError(
+            absl::StrCat("Failed to remove filter chain not added by FCDS: ", remove_name));
+        return new_config;
+      }
+
+      it = filter_chains->erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  // TODO: think remove/add with same name
+  for (const auto& add_filter_chain : added_filter_chains) {
+    if (filter_chain_manager_->filterChainExist(add_filter_chain.name())) {
+      creation_status = absl::AlreadyExistsError(
+          absl::StrCat("Filter chain with name ", add_filter_chain.name(), " already exists"));
+      return new_config;
+    }
+
+    *new_config.add_filter_chains() = add_filter_chain;
+  }
+
+  return new_config;
 }
 
 bool ListenerMessageUtil::socketOptionsEqual(const envoy::config::listener::v3::Listener& lhs,

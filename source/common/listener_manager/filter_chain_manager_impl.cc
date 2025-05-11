@@ -239,6 +239,7 @@ absl::Status FilterChainManagerImpl::addFilterChains(
     }
 
     fc_contexts_[*filter_chain] = filter_chain_impl;
+    filter_chain_names_.insert(filter_chain->name());
   }
   RETURN_IF_NOT_OK(convertIPsToTries());
   RETURN_IF_NOT_OK(copyOrRebuildDefaultFilterChain(default_filter_chain,

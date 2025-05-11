@@ -228,6 +228,11 @@ public:
   absl::StatusOr<std::unique_ptr<ListenerImpl>>
   newListenerWithFilterChain(const envoy::config::listener::v3::Listener& config,
                              bool workers_started, uint64_t hash);
+  absl::StatusOr<std::unique_ptr<ListenerImpl>>
+  newListenerWithFilterChain(
+      const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+      const std::vector<std::string>& removed_filter_chains, bool workers_started);
+
   /**
    * Determine if in place filter chain update could be executed at this moment.
    */
@@ -247,10 +252,12 @@ public:
   bool blockUpdate(uint64_t new_hash) { return new_hash == hash_ || !added_via_api_; }
   bool blockRemove() { return !added_via_api_; }
 
+  FcdsApiPtr createFcdsSubscription(
+      const envoy::config::listener::v3::Listener::FcdsConfig& fcds_config);
+
   const std::vector<Network::Address::InstanceConstSharedPtr>& addresses() const {
     return addresses_;
   }
-  const envoy::config::listener::v3::Listener& config() const { return config_; }
   const std::vector<Network::ListenSocketFactoryPtr>& getSocketFactories() const {
     return socket_factories_;
   }
@@ -346,6 +353,8 @@ public:
                                     Network::UdpReadFilterCallbacks& callbacks) override;
   bool createQuicListenerFilterChain(Network::QuicListenerFilterManager& manager) override;
 
+  void dumpConfig(ProtobufWkt::Any* dump) const;
+
   SystemTime last_updated_;
 
 private:
@@ -394,6 +403,16 @@ private:
                const std::string& version_info, ListenerManagerImpl& parent,
                const std::string& name, bool added_via_api, bool workers_started, uint64_t hash,
                absl::Status& creation_status);
+  /**
+   * Create a new listener from an existing listener with delta filter chains.
+   * Should be called only by newListenerWithFilterChain().
+   */
+  ListenerImpl(
+      ListenerImpl& origin,
+      const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+      const std::vector<std::string>& removed_filter_chains, const std::string& version_info,
+      ListenerManagerImpl& parent, bool workers_started, absl::Status& creation_status);
+
   // Helpers for constructor.
   void buildAccessLog(const envoy::config::listener::v3::Listener& config);
   absl::Status buildInternalListener(const envoy::config::listener::v3::Listener& config);
@@ -421,6 +440,16 @@ private:
     ensureSocketOptions(options);
     Network::Socket::appendOptions(options, append_options);
   }
+
+  /**
+   * Create a new listener config by applying filter chain updates to an existing config.
+   * @param added_filter_chains Filter chains to add
+   * @param removed_filter_chains Names of filter chains to remove
+   * @return A new listener config with the filter chain changes applied
+   */
+  envoy::config::listener::v3::Listener createListenerConfigFromFilterChainUpdates(
+      const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+      const std::vector<std::string>& removed_filter_chains, absl::Status& creation_status);
 
   ListenerManagerImpl& parent_;
   std::vector<Network::Address::InstanceConstSharedPtr> addresses_;
@@ -452,7 +481,10 @@ private:
   std::vector<Network::UdpListenerFilterFactoryCb> udp_listener_filter_factories_;
   Filter::QuicListenerFilterFactoriesList quic_listener_filter_factories_;
   AccessLog::InstanceSharedPtrVector access_logs_;
-  const envoy::config::listener::v3::Listener config_;
+  // When FCDS is enabled for the listener, config_maybe_without_filter_chains_ is inconsistent with
+  // the state of filter chains, as these can change during the lifetime of the listener. Keeping the
+  // config object consistent for every FCDS update has significant performance penalty.
+  const envoy::config::listener::v3::Listener config_maybe_without_filter_chains_;
   const std::string version_info_;
   // Using std::vector instead of hash map for supporting multiple zero port addresses.
   std::vector<Network::Socket::OptionsSharedPtr> listen_socket_options_list_;

@@ -14,6 +14,10 @@ public:
   MOCK_METHOD(absl::StatusOr<bool>, addOrUpdateListener,
               (const envoy::config::listener::v3::Listener& config, const std::string& version_info,
                bool modifiable));
+  MOCK_METHOD(absl::Status, updateDynamicFilterChains,
+              (const std::string& listener_name,
+              const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+              const std::vector<std::string>& removed_filter_chains));
   MOCK_METHOD(void, createLdsApi,
               (const envoy::config::core::v3::ConfigSource& lds_config,
                const xds::core::v3::ResourceLocator*));
