@@ -139,6 +139,26 @@ class ListenerImpl;
 using ListenerImplPtr = std::unique_ptr<ListenerImpl>;
 
 /**
+ * Manages FCDS subscriptions for all listeners.
+ */
+class FcdsSubscriptionManager {
+public:
+  using SubscriptionPtr = FcdsApiPtr;
+  using SubscriptionMap = absl::flat_hash_map<std::string, SubscriptionPtr>;
+
+  void setSubscription(const std::string& listener_name, SubscriptionPtr&& subscription) {
+    subscriptions_[listener_name] = std::move(subscription);
+  }
+
+  void removeSubscription(const std::string& listener_name) {
+    subscriptions_.erase(listener_name);
+  }
+
+private:
+  SubscriptionMap subscriptions_;
+};
+
+/**
  * All listener manager stats. @see stats_macros.h
  */
 #define ALL_LISTENER_MANAGER_STATS(COUNTER, GAUGE)                                                 \
@@ -217,6 +237,10 @@ public:
   absl::StatusOr<bool> addOrUpdateListener(const envoy::config::listener::v3::Listener& config,
                                            const std::string& version_info,
                                            bool added_via_api) override;
+  absl::Status updateDynamicFilterChains(
+      const std::string& listener_name,
+      const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+      const std::vector<std::string>& removed_filter_chains) override;
   void createLdsApi(const envoy::config::core::v3::ConfigSource& lds_config,
                     const xds::core::v3::ResourceLocator* lds_resources_locator) override {
     ASSERT(lds_api_ == nullptr);
@@ -335,6 +359,7 @@ private:
   absl::Status setupSocketFactoryForListener(ListenerImpl& new_listener,
                                              const ListenerImpl& existing_listener);
 
+  FcdsSubscriptionManager fcds_subscription_manager_;
   ApiListenerPtr api_listener_;
   // Active listeners are listeners that are currently accepting new connections on the workers.
   ListenerList active_listeners_;

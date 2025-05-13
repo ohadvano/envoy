@@ -150,9 +150,8 @@ absl::Status FilterChainManagerImpl::addFilterChains(
                         absl::StrJoin(addresses_, ",", Network::AddressStrFormatter()),
                         filter_chain->name(), matching_iter->second);
 #ifdef ENVOY_ENABLE_YAML
-        error_msg =
-            absl::StrCat(error_msg, ". duplicate matcher is: ",
-                         MessageUtil::getJsonStringFromMessageOrError(filter_chain_match, false));
+        absl::StrAppend(&error_msg, ". duplicate matcher is: ",
+                      MessageUtil::getJsonStringFromMessageOrError(filter_chain_match, false));
 #endif
 
         return absl::InvalidArgumentError(error_msg);
@@ -239,6 +238,7 @@ absl::Status FilterChainManagerImpl::addFilterChains(
     }
 
     fc_contexts_[*filter_chain] = filter_chain_impl;
+    filter_chain_names_.insert(filter_chain->name());
   }
   RETURN_IF_NOT_OK(convertIPsToTries());
   RETURN_IF_NOT_OK(copyOrRebuildDefaultFilterChain(default_filter_chain,
@@ -254,6 +254,20 @@ absl::Status FilterChainManagerImpl::addFilterChains(
   }
   ENVOY_LOG(debug, "new fc_contexts has {} filter chains, including {} newly built",
             fc_contexts_.size(), new_filter_chain_size);
+  return absl::OkStatus();
+}
+
+absl::Status FilterChainManagerImpl::addFilterChains(
+      const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+      const std::vector<std::string>& removed_filter_chains,
+      FilterChainFactoryBuilder& filter_chain_factory_builder,
+      FilterChainFactoryContextCreator& context_creator) {
+  ASSERT(origin_.has_value());
+  Cleanup cleanup([this]() { origin_ = absl::nullopt; });
+  UNREFERENCED_PARAMETER(added_filter_chains);
+  UNREFERENCED_PARAMETER(removed_filter_chains);
+  UNREFERENCED_PARAMETER(filter_chain_factory_builder);
+  UNREFERENCED_PARAMETER(context_creator);
   return absl::OkStatus();
 }
 

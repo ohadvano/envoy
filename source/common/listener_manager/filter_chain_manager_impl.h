@@ -149,11 +149,20 @@ public:
                                               const StreamInfo::StreamInfo& info) const override;
 
   // Add all filter chains into this manager. During the lifetime of FilterChainManagerImpl this
-  // should be called at most once.
+  // should be called at most once. This overload of addFilterChains should be called when creating
+  // a new listener and/or when updating a listener using LDS update.
   absl::Status addFilterChains(
       const xds::type::matcher::v3::Matcher* filter_chain_matcher,
       absl::Span<const envoy::config::listener::v3::FilterChain* const> filter_chain_span,
       const envoy::config::listener::v3::FilterChain* default_filter_chain,
+      FilterChainFactoryBuilder& filter_chain_factory_builder,
+      FilterChainFactoryContextCreator& context_creator);
+  // Apply delta filter chain update. This overload of addFilterChains should be called when
+  // updating a listener using FCDS update. This uses the origin filter chain manager as
+  // the baseline for the update, and clones its filter chains.
+  absl::Status addFilterChains(
+      const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+      const std::vector<std::string>& removed_filter_chains,
       FilterChainFactoryBuilder& filter_chain_factory_builder,
       FilterChainFactoryContextCreator& context_creator);
 
@@ -168,6 +177,9 @@ public:
   }
   const Network::DrainableFilterChainSharedPtr& defaultFilterChain() const {
     return default_filter_chain_;
+  }
+  void dumpFcdsFilterChains(envoy::config::listener::v3::Listener&) const {
+    IS_ENVOY_BUG("Unexpected function call: FCDS is not implemented");
   }
 
 private:
@@ -331,6 +343,10 @@ private:
 
   // Index filter chains by name, used by the matcher actions.
   FilterChainsByName filter_chains_by_name_;
+
+  absl::node_hash_set<std::string> filter_chain_names_;
+
+  absl::node_hash_set<std::string> dynamic_filter_chain_names_;
 };
 
 namespace FilterChain {
