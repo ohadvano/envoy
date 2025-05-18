@@ -1,0 +1,116 @@
+#include "source/common/listener_manager/fcds_api.h"
+
+#include "source/common/config/xds_resource.h"
+#include "source/common/grpc/common.h"
+
+namespace Envoy {
+namespace Server {
+
+FcdsApiImpl::FcdsApiImpl(const envoy::config::core::v3::ConfigSource& fcds_config,
+                        absl::string_view fcds_config_name, absl::string_view listener_name,
+                        Upstream::ClusterManager& cluster_manager, Stats::Scope& scope,
+                        Init::Manager& init_manager, ListenerManager& listener_manager,
+                        ProtobufMessage::ValidationVisitor& validation_visitor)
+    : Envoy::Config::SubscriptionBase<envoy::config::listener::v3::FilterChain>(validation_visitor,
+                                                                             "name"),
+      fcds_config_name_(fcds_config_name), listener_name_(listener_name),
+      scope_(scope.createScope("listener_manager.fcds.")), listener_manager_(listener_manager),
+      local_init_target_("FCDS", [this]() {
+        // This init target that is used to start the subscription regardless of whether the listener is
+        // started with warming or not.
+        subscription_->start({fcds_config_name_});
+        local_init_target_.ready();
+      }),
+      init_target_("FCDS", []() {}) {
+  const xds::core::v3::ResourceLocator fcds_resource_locator = THROW_OR_RETURN_VALUE(
+      Config::XdsResourceIdentifier::decodeUrl(fcds_config_name_),
+      xds::core::v3::ResourceLocator);
+  const auto resource_name = getResourceName();
+  subscription_ = THROW_OR_RETURN_VALUE(
+    cluster_manager.subscriptionFactory().collectionSubscriptionFromUrl(
+      fcds_resource_locator, fcds_config, resource_name,
+      *scope_, *this, resource_decoder_),
+    Config::SubscriptionPtr);
+
+  init_manager.add(local_init_target_);
+}
+
+absl::Status
+FcdsApiImpl::onConfigUpdate(const std::vector<Config::DecodedResourceRef>& added_resources,
+                            const Protobuf::RepeatedPtrField<std::string>& removed_resources,
+                            const std::string& version_info) {
+  ListenerManager::FailureStates failure_state;
+  listener_manager_.beginListenerUpdate();
+  std::string error_message;
+
+  FilterChainRefVector added_filter_chains;
+  for (const auto& resource : added_resources) {
+    if (!resource.get().hasResource()) {
+      continue;
+    }
+
+    added_filter_chains.push_back(
+        dynamic_cast<const envoy::config::listener::v3::FilterChain&>(resource.get().resource()));
+  }
+
+  absl::flat_hash_set<absl::string_view> removed_filter_chains;
+  removed_filter_chains.reserve(removed_resources.size());
+  for (const auto& resource : removed_resources) {
+    removed_filter_chains.insert(resource);
+  }
+
+  TRY_ASSERT_MAIN_THREAD {
+    absl::Status update_or_error =
+        listener_manager_.updateDynamicFilterChains(listener_name_, added_filter_chains, removed_filter_chains);
+
+    if (!update_or_error.ok()) {
+      error_message = std::string(update_or_error.message());
+    } else {
+      ENVOY_LOG(info, "fcds: updated listener '{}' filter chains", listener_name_);
+    }
+  }
+  END_TRY
+  CATCH(EnvoyException & e, { error_message = e.what(); })
+
+  if (!error_message.empty()) {
+    failure_state.emplace_back(envoy::admin::v3::UpdateFailureState());
+    auto& state_added = failure_state.back();
+    state_added.set_details(error_message);
+#if defined(ENVOY_ENABLE_FULL_PROTOS)
+    // state_added.mutable_failed_configuration()->PackFrom(added_resources);
+#endif
+
+    failure_state.emplace_back(envoy::admin::v3::UpdateFailureState());
+    auto& state_removed = failure_state.back();
+    state_removed.set_details(error_message);
+#if defined(ENVOY_ENABLE_FULL_PROTOS)
+    // state_removed.mutable_failed_configuration()->PackFrom(removed_resources);
+#endif
+  }
+
+  listener_manager_.endListenerUpdate(std::move(failure_state));
+  init_target_.ready();
+
+  if (!error_message.empty()) {
+    return absl::InvalidArgumentError(
+        fmt::format("Error updating listener {} with FCDS: {}", listener_name_, error_message));
+  }
+
+  version_info_ = version_info;
+  return absl::OkStatus();
+}
+
+absl::Status FcdsApiImpl::onConfigUpdate(const std::vector<Config::DecodedResourceRef>&,
+                                         const std::string&) {
+  return absl::UnavailableError("SoTW FCDS is not implemented");
+}
+
+void FcdsApiImpl::onConfigUpdateFailed(Envoy::Config::ConfigUpdateFailureReason reason,
+                                       const EnvoyException*) {
+  ASSERT(Envoy::Config::ConfigUpdateFailureReason::ConnectionFailure != reason);
+  // We need to allow server startup to continue, even if we have a bad config.
+  init_target_.ready();
+}
+
+} // namespace Server
+} // namespace Envoy
