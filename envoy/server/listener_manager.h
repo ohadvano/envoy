@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <vector>
 
 #include "envoy/admin/v3/config_dump.pb.h"
@@ -25,6 +26,9 @@ class TcpListenerFilterConfigProviderManagerImpl;
 
 namespace Server {
 
+using FilterChainRefVector =
+    std::vector<std::reference_wrapper<const envoy::config::listener::v3::FilterChain>>;
+
 /**
  * Interface for an LDS API provider.
  */
@@ -39,6 +43,21 @@ public:
 };
 
 using LdsApiPtr = std::unique_ptr<LdsApi>;
+
+/**
+ * Interface for filter chain discovery service.
+ */
+class FcdsApi {
+public:
+  virtual ~FcdsApi() = default;
+
+  /**
+   * @return std::string the last version passed to onConfigUpdate.
+   */
+  virtual std::string versionInfo() const PURE;
+};
+
+using FcdsApiPtr = std::unique_ptr<FcdsApi>;
 
 /**
  * Factory for creating listener components.
@@ -186,6 +205,17 @@ public:
   virtual absl::StatusOr<bool>
   addOrUpdateListener(const envoy::config::listener::v3::Listener& config,
                       const std::string& version_info, bool modifiable) PURE;
+
+  /**
+   * Updates the dynamic filter chains for a given listener.
+   * @param listener_name the name of the listener whose filter chains should be updated
+   * @param added_filter_chains the new filter chains to add
+   * @param removed_filter_chains the names of filter chains to remove
+   * @return absl::Status OK if the update succeeded, otherwise an error status
+   */
+  virtual absl::Status updateDynamicFilterChains(
+      const std::string& listener_name, const FilterChainRefVector& added_filter_chains,
+      const absl::flat_hash_set<absl::string_view>& removed_filter_chains) PURE;
 
   /**
    * Instruct the listener manager to create an LDS API provider. This is a separate operation
