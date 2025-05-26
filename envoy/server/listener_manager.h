@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <vector>
 
 #include "envoy/admin/v3/config_dump.pb.h"
@@ -25,6 +26,9 @@ class TcpListenerFilterConfigProviderManagerImpl;
 
 namespace Server {
 
+using FilterChainRefVector =
+    std::vector<std::reference_wrapper<const envoy::config::listener::v3::FilterChain>>;
+
 /**
  * Interface for an LDS API provider.
  */
@@ -39,6 +43,21 @@ public:
 };
 
 using LdsApiPtr = std::unique_ptr<LdsApi>;
+
+/**
+ * Interface for filter chain discovery service.
+ */
+class FcdsApi {
+public:
+  virtual ~FcdsApi() = default;
+
+  /**
+   * @return std::string the last version passed to onConfigUpdate.
+   */
+  virtual std::string versionInfo() const PURE;
+};
+
+using FcdsApiPtr = std::unique_ptr<FcdsApi>;
 
 /**
  * Factory for creating listener components.
@@ -188,6 +207,19 @@ public:
                       const std::string& version_info, bool modifiable) PURE;
 
   /**
+   * Updates the dynamic filter chains for a given listener.
+   * @param listener_name the name of the listener whose filter chains should be updated.
+   * @param version_info supplies the xDS version of the filter chains, if any added.
+   * @param added_filter_chains the new filter chains to add.
+   * @param removed_filter_chains the names of filter chains to remove.
+   * @return absl::Status OK if the update succeeded, otherwise an error status.
+   */
+  virtual absl::Status updateDynamicFilterChains(
+      const std::string& listener_name, absl::optional<std::string>& version_info,
+      const FilterChainRefVector& added_filter_chains,
+      const absl::flat_hash_set<absl::string_view>& removed_filter_chains) PURE;
+
+  /**
    * Instruct the listener manager to create an LDS API provider. This is a separate operation
    * during server initialization because the listener manager is created prior to several core
    * pieces of the server existing.
@@ -254,11 +286,26 @@ public:
   virtual void beginListenerUpdate() PURE;
 
   /*
+   * Warn the listener manager of an impending filter chains update.
+   * This allows the listener to clear per-update state.
+   * @param listener_name is the name of the listener being updated.
+   */
+  virtual void beginFilterChainsUpdate(const std::string& listener_name) PURE;
+
+  /*
    * Inform the listener manager that the update has completed, and informs the listener of any
    * errors handled by the reload source.
    */
   using FailureStates = std::vector<envoy::admin::v3::UpdateFailureState>;
   virtual void endListenerUpdate(FailureStates&& failure_states) PURE;
+
+  /*
+   * Inform the listener manager that the filter chains update has completed, and informs the
+   * listener of any errors handled by the reload source.
+   */
+  using FailureState = envoy::admin::v3::UpdateFailureState;
+  virtual void endFilterChainsUpdate(const std::string& listener_name,
+                                     absl::optional<FailureState> failure_state) PURE;
 
   // TODO(junr03): once ApiListeners support warming and draining, this function should return a
   // weak_ptr to its caller. This would allow the caller to verify if the

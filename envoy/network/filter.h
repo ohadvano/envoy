@@ -502,7 +502,7 @@ public:
 
   /**
    * Called before connection creation.
-   * @return false if the given preferred address is incomplatible with this filter and the listener
+   * @return false if the given preferred address is incompatible with this filter and the listener
    * shouldn't advertise the given preferred address. I.e. onAccept() would have behaved differently
    * if the connection socket's destination address were the preferred address.
    */
@@ -606,6 +606,11 @@ public:
    * @return the name of this filter chain.
    */
   virtual absl::string_view name() const PURE;
+
+  /**
+   * @return true if this filter chain configuration was discovered by FCDS.
+   */
+  virtual bool addedByDiscovery() const PURE;
 };
 
 using FilterChainSharedPtr = std::shared_ptr<FilterChain>;

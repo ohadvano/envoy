@@ -654,7 +654,7 @@ address:
   )EOF";
 
   EXPECT_THROW_WITH_REGEX(addOrUpdateListener(parseListenerFromV3Yaml(yaml)), EnvoyException,
-                          "no filter chains specified");
+                          "no filter chains specified and no filter chain discovery");
 }
 
 TEST_P(ListenerManagerImplWithRealFiltersTest, BadFilterConfig) {
@@ -8076,7 +8076,8 @@ TEST_P(ListenerManagerImplForInPlaceFilterChainUpdateTest, TraditionalUpdateOnZe
   EXPECT_CALL(server_.validation_context_, dynamicValidationVisitor());
   EXPECT_CALL(listener_factory_, createDrainManager_(_));
   EXPECT_THROW_WITH_MESSAGE(addOrUpdateListener(new_listener_proto), EnvoyException,
-                            "error adding listener '127.0.0.1:1234': no filter chains specified");
+                            "error adding listener '127.0.0.1:1234': no filter chains specified "
+                            "and no filter chain discovery");
 
   expectRemove(listener_proto, listener_foo, *listener_factory_.socket_);
   EXPECT_EQ(0UL, manager_->listeners().size());

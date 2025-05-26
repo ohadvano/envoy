@@ -41,6 +41,7 @@ class AdsIntegrationTest : public AdsDeltaSotwIntegrationSubStateParamTest,
                            public HttpIntegrationTest {
 public:
   AdsIntegrationTest();
+  AdsIntegrationTest(const std::string& config);
 
   void TearDown() override;
 
@@ -83,6 +84,7 @@ public:
 
   envoy::admin::v3::ClustersConfigDump getClustersConfigDump();
   envoy::admin::v3::ListenersConfigDump getListenersConfigDump();
+  envoy::admin::v3::FilterChainsConfigDump getFilterChainsConfigDump();
   envoy::admin::v3::RoutesConfigDump getRoutesConfigDump();
 };
 
