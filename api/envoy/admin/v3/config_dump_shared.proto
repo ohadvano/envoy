@@ -152,6 +152,54 @@ message ListenersConfigDump {
   repeated DynamicListener dynamic_listeners = 3;
 }
 
+// Envoy's listener manager fills this message with all currently known filter chains.
+message FilterChainsConfigDump {
+  message DynamicFilterChainState {
+    // This is the per-resource version information.
+    string version_info = 1;
+
+    // The filter chain config.
+    google.protobuf.Any filter_chain = 2;
+
+    // The timestamp when the filter chain was last successfully updated.
+    google.protobuf.Timestamp last_updated = 3;
+  }
+
+  // Describes a dynamically loaded filter chain via the FCDS API.
+  // [#next-free-field: 7]
+  message DynamicFilterChain {
+    // The name or unique id of this filter chain, pulled from the DynamicFilterChainState config.
+    string name = 1;
+
+    // The filter chain state for any active filter chain by this name.
+    // These are filter chain that are available to service data plane traffic.
+    DynamicFilterChainState active_state = 2;
+
+    // The filter chain state for any warming filter chain by this name.
+    // These are filter chain that are currently undergoing warming in preparation to service data
+    // plane traffic.
+    DynamicFilterChainState warming_state = 3;
+
+    // The filter chain state for any draining filter chain by this name.
+    // These are filter chain that are currently undergoing draining in preparation to stop servicing
+    // data plane traffic.
+    DynamicFilterChainState draining_state = 4;
+
+    // Set if the last update failed, cleared after the next successful update.
+    // The ``error_state`` field contains the rejected version of this particular
+    // resource along with the reason and timestamp. For successfully updated or
+    // acknowledged resource, this field should be empty.
+    UpdateFailureState error_state = 5;
+
+    // The client status of this resource.
+    // [#not-implemented-hide:]
+    ClientResourceStatus client_status = 6;
+  }
+
+  // State for any warming, active, or draining filter chains.
+  repeated DynamicFilterChain dynamic_filter_chains = 1;
+}
+
 // Envoy's cluster manager fills this message with all currently known clusters. Cluster
 // configuration information can be used to recreate an Envoy configuration by populating all
 // clusters as static clusters or by returning them in a CDS response.

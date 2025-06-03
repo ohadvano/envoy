@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "envoy/buffer/buffer.h"
+#include "envoy/config/core/v3/config_source.pb.h"
 #include "envoy/config/extension_config_provider.h"
 #include "envoy/network/listen_socket.h"
 #include "envoy/network/listener_filter_buffer.h"
@@ -26,6 +27,10 @@ namespace Event {
 class Dispatcher;
 }
 
+namespace Server {
+struct OnDemandFcdsDiscoveryResult;
+class OnDemandFcdsDiscoveryCallbacks;
+} // namespace Server
 namespace Network {
 
 class Connection;
@@ -398,6 +403,15 @@ public:
    * @param use_original_dst whether to use original destination address or not.
    */
   virtual void useOriginalDst(bool use_original_dst) PURE;
+
+  /**
+   * @param name is the filter chain collection name to discover.
+   */
+  virtual Server::OnDemandFcdsDiscoveryResult
+  requestOnDemandFilterChainDiscovery(const envoy::config::core::v3::ConfigSource& config_source,
+                                      const std::string& subscription_name,
+                                      Server::OnDemandFcdsDiscoveryCallbacks& callbacks,
+                                      const std::chrono::milliseconds& timeout) PURE;
 };
 
 /**
@@ -502,7 +516,7 @@ public:
 
   /**
    * Called before connection creation.
-   * @return false if the given preferred address is incomplatible with this filter and the listener
+   * @return false if the given preferred address is incompatible with this filter and the listener
    * shouldn't advertise the given preferred address. I.e. onAccept() would have behaved differently
    * if the connection socket's destination address were the preferred address.
    */
@@ -606,6 +620,11 @@ public:
    * @return the name of this filter chain.
    */
   virtual absl::string_view name() const PURE;
+
+  /**
+   * @return true if this filter chain configuration was discovered by FCDS.
+   */
+  virtual bool addedByDiscovery() const PURE;
 };
 
 using FilterChainSharedPtr = std::shared_ptr<FilterChain>;

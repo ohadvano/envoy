@@ -5,6 +5,7 @@
 #include "envoy/event/dispatcher.h"
 #include "envoy/runtime/runtime.h"
 #include "envoy/server/guarddog.h"
+#include "envoy/server/listener_manager.h"
 #include "envoy/server/overload/overload_manager.h"
 
 namespace Envoy {
@@ -113,6 +114,7 @@ public:
    * @return WorkerPtr a new worker.
    */
   virtual WorkerPtr createWorker(uint32_t index, OverloadManager& overload_manager,
+                                 ListenerManager& listener_manager,
                                  OverloadManager& null_overload_manager,
                                  const std::string& worker_name) PURE;
 };

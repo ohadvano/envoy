@@ -149,6 +149,7 @@ envoy_cc_library(
     name = "worker_interface",
     hdrs = ["worker.h"],
     deps = [
+        ":listener_manager_interface",
         "//envoy/runtime:runtime_interface",
         "//envoy/server:guarddog_interface",
         "//envoy/server/overload:overload_manager_interface",

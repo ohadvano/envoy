@@ -659,6 +659,13 @@ envoy.filters.listener.tls_inspector:
   status: stable
   type_urls:
   - envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+envoy.filters.listener.on_demand_fcds:
+  categories:
+  - envoy.filters.listener
+  security_posture: robust_to_untrusted_downstream
+  status: alpha
+  type_urls:
+  - envoy.extensions.filters.listener.on_demand_fcds.v3.FilterConfig
 envoy.filters.network.connection_limit:
   categories:
   - envoy.filters.network

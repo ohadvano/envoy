@@ -17,6 +17,9 @@
 #include "source/common/common/interval_value.h"
 
 namespace Envoy {
+namespace Server {
+class ListenerManager;
+}
 namespace Network {
 
 // This interface allows for a listener to perform an alternative behavior when a
@@ -126,6 +129,11 @@ public:
    * @return the stat prefix used for per-handler stats.
    */
   virtual const std::string& statPrefix() const PURE;
+
+  /**
+   * @return the server's listener manager.
+   */
+  virtual Server::ListenerManager& listenerManager() PURE;
 
   /**
    * Used by ConnectionHandler to manage listeners.

@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package envoy.extensions.filters.listener.on_demand_fcds.v3;
+
+import "envoy/config/core/v3/config_source.proto";
+
+import "google/protobuf/duration.proto";
+
+import "udpa/annotations/status.proto";
+
+option java_package = "io.envoyproxy.envoy.extensions.filters.listener.on_demand_fcds.v3";
+option java_outer_classname = "OnDemandFcdsProto";
+option java_multiple_files = true;
+option go_package = "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/on_demand_fcds/v3;on_demand_fcdsv3";
+option (udpa.annotations.file_status).package_version_status = ACTIVE;
+
+// [#protodoc-title: On-Demand FCDS Filter]
+// Allows stopping listener filter chain and request an on-demand filter chain discovery
+// service (FCDS) request.
+// [#extension: envoy.filters.listener.on_demand_fcds]
+
+message FilterConfig {
+  // A configuration source for the service that will be used for on-demand filter chain discovery.
+  // .. note::
+  //
+  //   If :ref:`fcds_config <envoy_v3_api_field_config.listener.v3.Listener.fcds_config>` is set for the listener,
+  //   this field will be ignored and the FCDS service will be used from the listener configuration.
+  //
+  config.core.v3.ConfigSource config_source = 1;
+
+  // xdstp:// resource locator for on-demand filter chain collection.
+  // It is possible to dynamically override this configuration by setting a per-connection filter
+  // state object for the key ``envoy.on_demand_fcds.per_connection_resources_locator``.
+  string resources_locator = 2;
+
+  // The timeout for on demand lookup. If not set, defaults to 5 seconds. Note that this may be
+  // capped by the :ref:`listener_filters_timeout <envoy_v3_api_field_config.listener.v3.Listener.listener_filters_timeout>`
+  // configuration in the listener.
+  google.protobuf.Duration timeout = 3;
+
+  // If set to true, the listener filter chain will continue processing even if the on-demand FCDS request fails.
+  bool continue_on_failure = 4;
+}

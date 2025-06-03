@@ -33,7 +33,7 @@ public:
 
   // Server::WorkerFactory
   WorkerPtr createWorker(uint32_t index, OverloadManager& overload_manager,
-                         OverloadManager& null_overload_manager,
+                         ListenerManager& listener_manager, OverloadManager& null_overload_manager,
                          const std::string& worker_name) override;
 
 private:

@@ -227,6 +227,12 @@ public:
   absl::StatusOr<std::unique_ptr<ListenerImpl>>
   newListenerWithFilterChain(const envoy::config::listener::v3::Listener& config,
                              bool workers_started, uint64_t hash);
+  absl::StatusOr<std::unique_ptr<ListenerImpl>>
+  newListenerWithFilterChain(absl::optional<std::string>& fcds_version_info,
+                             const FilterChainRefVector& added_filter_chains,
+                             const absl::flat_hash_set<absl::string_view>& removed_filter_chains,
+                             bool workers_started);
+
   /**
    * Determine if in place filter chain update could be executed at this moment.
    */
@@ -243,17 +249,29 @@ public:
   /**
    * Helper functions to determine whether a listener is blocked for update or remove.
    */
-  bool blockUpdate(uint64_t new_hash) { return new_hash == hash_ || !added_via_api_; }
+  bool blockLdsUpdate(uint64_t new_hash) {
+    // Receiving LDS update with FCDS config will cause full listener update. Therefore,
+    // we should not block the update if FCDS is configured, regardless of the hash.
+    return (!configInternal().has_fcds_config() && new_hash == maybe_stale_hash_) ||
+           !added_via_api_;
+  }
   bool blockRemove() { return !added_via_api_; }
 
+  FcdsApiPtr
+  createFcdsSubscription(const envoy::config::listener::v3::Listener::FcdsConfig& fcds_config);
+
+  void maybeAddListenerInitTarget();
   const std::vector<Network::Address::InstanceConstSharedPtr>& addresses() const {
     return addresses_;
   }
-  const envoy::config::listener::v3::Listener& config() const { return config_; }
+  const std::string& configName() const { return configInternal().name(); }
   const std::vector<Network::ListenSocketFactoryPtr>& getSocketFactories() const {
     return socket_factories_;
   }
   void debugLog(const std::string& message);
+  void dumpListenerConfig(ProtobufWkt::Any& dump) const;
+  std::vector<const envoy::config::listener::v3::FilterChain*>
+  getDiscoveredFilterChainsConfig(const Matchers::StringMatcher& name_matcher) const;
   void initialize();
   DrainManager& localDrainManager() const {
     return listener_factory_context_->listener_factory_context_base_->drainManager();
@@ -265,6 +283,7 @@ public:
     return listen_socket_options_list_[address_index];
   }
   const std::string& versionInfo() const { return version_info_; }
+  const std::string& dynamicFilterChainsVersionInfo() const { return fcds_version_info_; }
   bool reusePort() const { return reuse_port_; }
   static bool getReusePortOrDefault(Server::Instance& server,
                                     const envoy::config::listener::v3::Listener& config,
@@ -393,6 +412,15 @@ private:
                const std::string& version_info, ListenerManagerImpl& parent,
                const std::string& name, bool added_via_api, bool workers_started, uint64_t hash,
                absl::Status& creation_status);
+  /**
+   * Create a new listener from an existing listener with delta filter chains.
+   * Should be called only by newListenerWithFilterChain().
+   */
+  ListenerImpl(ListenerImpl& origin, const FilterChainRefVector& added_filter_chains,
+               const absl::flat_hash_set<absl::string_view>& removed_filter_chains,
+               absl::optional<std::string>& fcds_version_info, bool workers_started,
+               absl::Status& creation_status);
+
   // Helpers for constructor.
   void buildAccessLog(const envoy::config::listener::v3::Listener& config);
   absl::Status buildInternalListener(const envoy::config::listener::v3::Listener& config);
@@ -407,6 +435,10 @@ private:
   absl::Status createListenerFilterFactories(const envoy::config::listener::v3::Listener& config);
   absl::Status validateFilterChains(const envoy::config::listener::v3::Listener& config);
   absl::Status buildFilterChains(const envoy::config::listener::v3::Listener& config);
+  absl::Status
+  buildFilterChains(const FilterChainRefVector& added_filter_chains,
+                    const absl::flat_hash_set<absl::string_view>& removed_filter_chains);
+  void trackOriginInitDependencies(ListenerImpl& origin);
   absl::Status buildConnectionBalancer(const envoy::config::listener::v3::Listener& config,
                                        const Network::Address::Instance& address);
   void buildSocketOptions(const envoy::config::listener::v3::Listener& config);
@@ -420,6 +452,22 @@ private:
     ensureSocketOptions(options);
     Network::Socket::appendOptions(options, append_options);
   }
+  // configInternal returns the listener config. If FCDS is enabled, the config filter chain
+  // is expected to be partial and only contain filter chains added statically or with LDS.
+  // If FCDS is enabled, avoid using the config object for decisions based on filter chains.
+  const envoy::config::listener::v3::Listener& configInternal() const {
+    return config_maybe_partial_filter_chains_;
+  }
+
+  /**
+   * Create a new listener config by applying filter chain updates to an existing config.
+   * @param added_filter_chains Filter chains to add
+   * @param removed_filter_chains Names of filter chains to remove
+   * @return A new listener config with the filter chain changes applied
+   */
+  envoy::config::listener::v3::Listener createListenerConfigFromFilterChainUpdates(
+      const std::vector<envoy::config::listener::v3::FilterChain>& added_filter_chains,
+      const std::vector<std::string>& removed_filter_chains, absl::Status& creation_status);
 
   ListenerManagerImpl& parent_;
   std::vector<Network::Address::InstanceConstSharedPtr> addresses_;
@@ -434,25 +482,40 @@ private:
   const std::string name_;
   const bool added_via_api_;
   const bool workers_started_;
-  const uint64_t hash_;
+  // Note: when FCDS is enabled and filter chains change, the stored hash may become stale.
+  // We deliberately skip recomputing it for performance, since the hash is only used
+  // to decide on in-place LDS updates, and when FCDS is configured, LDS update force a full
+  // listener update anyway.
+  const uint64_t maybe_stale_hash_;
   const uint32_t tcp_backlog_size_;
   const uint32_t max_connections_to_accept_per_socket_event_;
   ProtobufMessage::ValidationVisitor& validation_visitor_;
   const bool ignore_global_conn_limit_;
   const bool bypass_overload_manager_;
+  const bool start_listener_without_warming_;
+  const bool created_by_fcds_;
+
+  std::shared_ptr<Init::TargetImpl> tracking_init_target_;
+  std::shared_ptr<Init::WatcherImpl> tracking_init_watcher_;
 
   // A target is added to Server's InitManager if workers_started_ is false.
-  Init::TargetImpl listener_init_target_;
+  std::shared_ptr<Init::TargetImpl> listener_init_target_;
+  std::vector<std::shared_ptr<Init::TargetImpl>> origins_listener_init_target_;
   // This init manager is populated with targets from the filter chain factories, namely
   // RdsRouteConfigSubscription::init_target_, so the listener can wait for route configs.
-  std::unique_ptr<Init::Manager> dynamic_init_manager_;
+  std::shared_ptr<Init::Manager> dynamic_init_manager_;
+  std::vector<std::shared_ptr<Init::Manager>> origins_dynamic_init_manager_;
 
   Filter::ListenerFilterFactoriesList listener_filter_factories_;
   std::vector<Network::UdpListenerFilterFactoryCb> udp_listener_filter_factories_;
   Filter::QuicListenerFilterFactoriesList quic_listener_filter_factories_;
   AccessLog::InstanceSharedPtrVector access_logs_;
-  const envoy::config::listener::v3::Listener config_;
+  // When FCDS is enabled for the listener, config_maybe_partial_filter_chains_ is inconsistent with
+  // the state of filter chains, as these can change during the lifetime of the listener. Keeping
+  // the config object consistent for every FCDS update has significant performance penalty.
+  const envoy::config::listener::v3::Listener config_maybe_partial_filter_chains_;
   const std::string version_info_;
+  const std::string fcds_version_info_;
   // Using std::vector instead of hash map for supporting multiple zero port addresses.
   std::vector<Network::Socket::OptionsSharedPtr> listen_socket_options_list_;
   const std::chrono::milliseconds listener_filters_timeout_;
@@ -476,12 +539,14 @@ private:
   // listener initialization is complete.
   // Important: local_init_watcher_ must be the last field in the class to avoid unexpected
   // watcher callback during the destroy of ListenerImpl.
-  Init::WatcherImpl local_init_watcher_;
+  std::shared_ptr<Init::WatcherImpl> local_init_watcher_;
+  std::vector<std::shared_ptr<Init::WatcherImpl>> origins_local_init_watcher_;
   std::shared_ptr<Server::Configuration::TransportSocketFactoryContextImpl>
       transport_factory_context_;
 
   Quic::QuicStatNames& quic_stat_names_;
   MissingListenerConfigStats missing_listener_config_stats_;
+  bool updating_listener_{false};
 
   // to access ListenerManagerImpl::factory_.
   friend class ListenerFilterChainFactoryBuilder;

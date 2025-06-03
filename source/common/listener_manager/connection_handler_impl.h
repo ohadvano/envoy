@@ -38,7 +38,8 @@ public:
 
   ConnectionHandlerImpl(Event::Dispatcher& dispatcher, absl::optional<uint32_t> worker_index);
   ConnectionHandlerImpl(Event::Dispatcher& dispatcher, absl::optional<uint32_t> worker_index,
-                        OverloadManager& overload_manager, OverloadManager& null_overload_manager);
+                        ListenerManager& listener_manager, OverloadManager& overload_manager,
+                        OverloadManager& null_overload_manager);
 
   // Network::ConnectionHandler
   uint64_t numConnections() const override { return num_handler_connections_; }
@@ -56,6 +57,11 @@ public:
   void disableListeners() override;
   void enableListeners() override;
   void setListenerRejectFraction(UnitFloat reject_fraction) override;
+  Server::ListenerManager& listenerManager() override {
+    ASSERT(listener_manager_.has_value(), "should only be called on workers connection handlers");
+    return *listener_manager_;
+  }
+
   const std::string& statPrefix() const override { return per_handler_stat_prefix_; }
 
   // Network::TcpConnectionHandler
@@ -153,6 +159,7 @@ private:
   // This has a value on worker threads, and no value on the main thread.
   const absl::optional<uint32_t> worker_index_;
   Event::Dispatcher& dispatcher_;
+  OptRef<ListenerManager> listener_manager_;
   OptRef<OverloadManager> overload_manager_;
   OptRef<OverloadManager> null_overload_manager_;
   const std::string per_handler_stat_prefix_;
@@ -172,10 +179,10 @@ class ConnectionHandlerFactoryImpl : public ConnectionHandlerFactory {
 public:
   std::unique_ptr<ConnectionHandler>
   createConnectionHandler(Event::Dispatcher& dispatcher, absl::optional<uint32_t> worker_index,
-                          OverloadManager& overload_manager,
+                          OverloadManager& overload_manager, ListenerManager& listener_manager,
                           OverloadManager& null_overload_manager) override {
-    return std::make_unique<ConnectionHandlerImpl>(dispatcher, worker_index, overload_manager,
-                                                   null_overload_manager);
+    return std::make_unique<ConnectionHandlerImpl>(dispatcher, worker_index, listener_manager,
+                                                   overload_manager, null_overload_manager);
   }
   std::unique_ptr<ConnectionHandler>
   createConnectionHandler(Event::Dispatcher& dispatcher,

@@ -1,6 +1,7 @@
 #include "source/common/listener_manager/active_tcp_socket.h"
 
 #include "envoy/network/filter.h"
+#include "envoy/server/listener_manager.h"
 
 #include "source/common/listener_manager/active_stream_listener_base.h"
 #include "source/common/stream_info/stream_info_impl.h"
@@ -170,6 +171,15 @@ void ActiveTcpSocket::continueFilterChain(bool success) {
   if (inserted()) {
     unlink();
   }
+}
+
+Server::OnDemandFcdsDiscoveryResult ActiveTcpSocket::requestOnDemandFilterChainDiscovery(
+    const envoy::config::core::v3::ConfigSource& config_source,
+    const std::string& subscription_name, Server::OnDemandFcdsDiscoveryCallbacks& callbacks,
+    const std::chrono::milliseconds& timeout) {
+  return listener_.parent_.listenerManager().onDemandFilterChainDiscovery(
+      config_source, listener_.config_->name(), subscription_name, callbacks, dispatcher(),
+      timeout);
 }
 
 void ActiveTcpSocket::setDynamicMetadata(const std::string& name,

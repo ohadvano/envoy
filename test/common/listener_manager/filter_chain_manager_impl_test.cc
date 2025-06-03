@@ -8,6 +8,7 @@
 #include "envoy/config/listener/v3/listener_components.pb.h"
 #include "envoy/registry/registry.h"
 #include "envoy/server/filter_config.h"
+#include "envoy/server/listener_manager.h"
 
 #include "source/common/api/os_sys_calls_impl.h"
 #include "source/common/config/metadata.h"
@@ -47,12 +48,13 @@ namespace Server {
 class MockFilterChainFactoryBuilder : public FilterChainFactoryBuilder {
 public:
   MockFilterChainFactoryBuilder() {
-    ON_CALL(*this, buildFilterChain(_, _))
+    ON_CALL(*this, buildFilterChain(_, _, _))
         .WillByDefault(Return(std::make_shared<Network::MockFilterChain>()));
   }
 
   MOCK_METHOD(absl::StatusOr<Network::DrainableFilterChainSharedPtr>, buildFilterChain,
-              (const envoy::config::listener::v3::FilterChain&, FilterChainFactoryContextCreator&),
+              (const envoy::config::listener::v3::FilterChain&, FilterChainFactoryContextCreator&,
+               bool),
               (const));
 };
 
@@ -198,9 +200,9 @@ TEST_P(FilterChainManagerImplTest, AddSingleFilterChain) {
 
 TEST_P(FilterChainManagerImplTest, FilterChainUseFallbackIfNoFilterChainMatches) {
   // The build helper will build matchable filter chain and then build the default filter chain.
-  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _))
+  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
       .WillOnce(Return(build_out_fallback_filter_chain_));
-  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _))
+  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
       .WillOnce(Return(std::make_shared<Network::MockFilterChain>()))
       .RetiresOnSaturation();
   addSingleFilterChainHelper(filter_chain_template_, &fallback_filter_chain_);
@@ -222,7 +224,7 @@ TEST_P(FilterChainManagerImplTest, LookupFilterChainContextByFilterChainMessage)
     new_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10000 + i);
     filter_chain_messages.push_back(std::move(new_filter_chain));
   }
-  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _)).Times(2);
+  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _)).Times(2);
   EXPECT_TRUE(filter_chain_manager_
                   ->addFilterChains(GetParam() ? &matcher_ : nullptr,
                                     std::vector<const envoy::config::listener::v3::FilterChain*>{
@@ -242,7 +244,7 @@ TEST_P(FilterChainManagerImplTest, DuplicateContextsAreNotBuilt) {
     filter_chain_messages.push_back(std::move(new_filter_chain));
   }
 
-  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _));
+  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _));
   EXPECT_TRUE(filter_chain_manager_
                   ->addFilterChains(GetParam() ? &matcher_ : nullptr,
                                     std::vector<const envoy::config::listener::v3::FilterChain*>{
@@ -253,7 +255,7 @@ TEST_P(FilterChainManagerImplTest, DuplicateContextsAreNotBuilt) {
                                                   *filter_chain_manager_};
   // The new filter chain manager maintains 3 filter chains, but only 2 filter chain context is
   // built because it reuse the filter chain context in the previous filter chain manager
-  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _)).Times(2);
+  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _)).Times(2);
   EXPECT_TRUE(new_filter_chain_manager
                   .addFilterChains(GetParam() ? &matcher_ : nullptr,
                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
@@ -311,6 +313,266 @@ TEST_P(FilterChainManagerImplTest, DuplicateFilterChainMatchFails) {
             "{\"destination_port\":10000,\"server_names\":[\"example.com\"]}"
 #endif
   );
+}
+
+TEST_P(FilterChainManagerImplTest, DeltaUpdateFailsForNonFcdsFilterChain) {
+  envoy::config::listener::v3::FilterChain non_fcds_filter_chain = filter_chain_template_;
+  non_fcds_filter_chain.set_name("non_fcds_chain");
+  non_fcds_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10001);
+
+  auto filter_chain = std::make_shared<Network::MockFilterChain>();
+  // mark the added filter chain as not added by discovery
+  EXPECT_CALL(*filter_chain, addedByDiscovery()).WillRepeatedly(Return(false));
+  ON_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
+      .WillByDefault(Return(filter_chain));
+
+  EXPECT_TRUE(filter_chain_manager_
+                  ->addFilterChains(GetParam() ? &matcher_ : nullptr,
+                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
+                                        &non_fcds_filter_chain},
+                                    nullptr, filter_chain_factory_builder_, *filter_chain_manager_)
+                  .ok());
+
+  FilterChainManagerImpl new_filter_chain_manager{addresses_, parent_context_, init_manager_,
+                                                  *filter_chain_manager_};
+
+  envoy::config::listener::v3::FilterChain updated_filter_chain = non_fcds_filter_chain;
+  updated_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10002);
+
+  auto status = new_filter_chain_manager.addFilterChains(
+      GetParam() ? &matcher_ : nullptr, {std::cref(updated_filter_chain)}, {}, nullptr,
+      filter_chain_factory_builder_, new_filter_chain_manager);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(),
+            "error applying FCDS update; filter chain 'non_fcds_chain' cannot be updated"
+            " as it was not added by filter chain discovery");
+}
+
+TEST_P(FilterChainManagerImplTest, DeltaRemoveFailsForNonFcdsFilterChain) {
+  envoy::config::listener::v3::FilterChain non_fcds_filter_chain = filter_chain_template_;
+  non_fcds_filter_chain.set_name("non_fcds_chain");
+  non_fcds_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10001);
+
+  auto filter_chain = std::make_shared<Network::MockFilterChain>();
+  // mark the added filter chain as not added by discovery
+  EXPECT_CALL(*filter_chain, addedByDiscovery()).WillRepeatedly(Return(false));
+  ON_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
+      .WillByDefault(Return(filter_chain));
+
+  EXPECT_TRUE(filter_chain_manager_
+                  ->addFilterChains(GetParam() ? &matcher_ : nullptr,
+                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
+                                        &non_fcds_filter_chain},
+                                    nullptr, filter_chain_factory_builder_, *filter_chain_manager_)
+                  .ok());
+
+  FilterChainManagerImpl new_filter_chain_manager{addresses_, parent_context_, init_manager_,
+                                                  *filter_chain_manager_};
+
+  envoy::config::listener::v3::FilterChain updated_filter_chain = non_fcds_filter_chain;
+  updated_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10002);
+
+  auto status = new_filter_chain_manager.addFilterChains(
+      GetParam() ? &matcher_ : nullptr, {}, {"non_fcds_chain"}, nullptr,
+      filter_chain_factory_builder_, new_filter_chain_manager);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(),
+            "error applying FCDS update; filter chain 'non_fcds_chain' cannot be removed"
+            " as it was not added by filter chain discovery");
+}
+
+TEST_P(FilterChainManagerImplTest, UpdateFilterChainMarksForDraining) {
+  envoy::config::listener::v3::FilterChain fcds_filter_chain = filter_chain_template_;
+  fcds_filter_chain.set_name("fcds_chain");
+  fcds_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10001);
+
+  auto filter_chain = std::make_shared<Network::MockFilterChain>();
+  EXPECT_CALL(*filter_chain, addedByDiscovery()).WillRepeatedly(Return(true));
+  ON_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
+      .WillByDefault(Return(filter_chain));
+
+  EXPECT_TRUE(filter_chain_manager_
+                  ->addFilterChains(GetParam() ? &matcher_ : nullptr,
+                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
+                                        &fcds_filter_chain},
+                                    nullptr, filter_chain_factory_builder_, *filter_chain_manager_)
+                  .ok());
+
+  FilterChainManagerImpl new_filter_chain_manager{addresses_, parent_context_, init_manager_,
+                                                  *filter_chain_manager_};
+
+  envoy::config::listener::v3::FilterChain updated_filter_chain = fcds_filter_chain;
+  updated_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10002);
+
+  auto status = new_filter_chain_manager.addFilterChains(
+      GetParam() ? &matcher_ : nullptr, {updated_filter_chain}, {}, nullptr,
+      filter_chain_factory_builder_, new_filter_chain_manager);
+
+  EXPECT_TRUE(status.ok());
+  EXPECT_TRUE(filter_chain_manager_->drainingFilterChains().has_value());
+  EXPECT_EQ(filter_chain_manager_->drainingFilterChains()->size(), 1);
+  EXPECT_EQ(filter_chain_manager_->drainingFilterChains()->front(), filter_chain);
+}
+
+TEST_P(FilterChainManagerImplTest, RemoveFilterChainMarksForDraining) {
+  envoy::config::listener::v3::FilterChain fcds_filter_chain = filter_chain_template_;
+  fcds_filter_chain.set_name("fcds_chain");
+  fcds_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10001);
+
+  auto filter_chain = std::make_shared<Network::MockFilterChain>();
+  EXPECT_CALL(*filter_chain, addedByDiscovery()).WillRepeatedly(Return(true));
+  ON_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
+      .WillByDefault(Return(filter_chain));
+
+  EXPECT_TRUE(filter_chain_manager_
+                  ->addFilterChains(GetParam() ? &matcher_ : nullptr,
+                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
+                                        &fcds_filter_chain},
+                                    nullptr, filter_chain_factory_builder_, *filter_chain_manager_)
+                  .ok());
+
+  FilterChainManagerImpl new_filter_chain_manager{addresses_, parent_context_, init_manager_,
+                                                  *filter_chain_manager_};
+
+  envoy::config::listener::v3::FilterChain updated_filter_chain = fcds_filter_chain;
+  updated_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10002);
+
+  auto status = new_filter_chain_manager.addFilterChains(
+      GetParam() ? &matcher_ : nullptr, {}, {"fcds_chain"}, nullptr, filter_chain_factory_builder_,
+      new_filter_chain_manager);
+
+  EXPECT_TRUE(status.ok());
+  EXPECT_TRUE(filter_chain_manager_->drainingFilterChains().has_value());
+  EXPECT_EQ(filter_chain_manager_->drainingFilterChains()->size(), 1);
+  EXPECT_EQ(filter_chain_manager_->drainingFilterChains()->front(), filter_chain);
+}
+
+TEST_P(FilterChainManagerImplTest, FailToAddFilterChainWithDuplicateMatcherByDeltaUpdate) {
+  envoy::config::listener::v3::FilterChain fcds_filter_chain = filter_chain_template_;
+  fcds_filter_chain.set_name("fcds_chain");
+  fcds_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10001);
+
+  auto filter_chain = std::make_shared<Network::MockFilterChain>();
+  EXPECT_CALL(*filter_chain, addedByDiscovery()).WillRepeatedly(Return(true));
+  ON_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
+      .WillByDefault(Return(filter_chain));
+
+  EXPECT_TRUE(filter_chain_manager_
+                  ->addFilterChains(nullptr,
+                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
+                                        &fcds_filter_chain},
+                                    nullptr, filter_chain_factory_builder_, *filter_chain_manager_)
+                  .ok());
+
+  FilterChainManagerImpl new_filter_chain_manager{addresses_, parent_context_, init_manager_,
+                                                  *filter_chain_manager_};
+
+  envoy::config::listener::v3::FilterChain another_filter_chain = fcds_filter_chain;
+  another_filter_chain.set_name("another_fcds_chain");
+
+  auto status = new_filter_chain_manager.addFilterChains(nullptr, {another_filter_chain}, {},
+                                                         nullptr, filter_chain_factory_builder_,
+                                                         new_filter_chain_manager);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(),
+            "error adding listener '127.0.0.1:1234': filter chain 'another_fcds_chain' has the "
+            "same matching rules defined as 'fcds_chain'"
+#ifdef ENVOY_ENABLE_YAML
+            ". duplicate matcher is: "
+            "{\"destination_port\":10001}"
+#endif
+  );
+}
+
+TEST_P(FilterChainManagerImplTest, FailToAddFilterChainsWithDuplicateNameByDeltaUpdate) {
+  envoy::config::listener::v3::FilterChain fcds_filter_chain = filter_chain_template_;
+  fcds_filter_chain.set_name("fcds_chain");
+  fcds_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10001);
+
+  auto filter_chain = std::make_shared<Network::MockFilterChain>();
+  EXPECT_CALL(*filter_chain, addedByDiscovery()).WillRepeatedly(Return(true));
+  ON_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
+      .WillByDefault(Return(filter_chain));
+
+  EXPECT_TRUE(filter_chain_manager_
+                  ->addFilterChains(GetParam() ? &matcher_ : nullptr,
+                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
+                                        &fcds_filter_chain},
+                                    nullptr, filter_chain_factory_builder_, *filter_chain_manager_)
+                  .ok());
+
+  FilterChainManagerImpl new_filter_chain_manager{addresses_, parent_context_, init_manager_,
+                                                  *filter_chain_manager_};
+
+  envoy::config::listener::v3::FilterChain added_filter_chain_1 = fcds_filter_chain;
+  added_filter_chain_1.mutable_filter_chain_match()->mutable_destination_port()->set_value(10002);
+  envoy::config::listener::v3::FilterChain added_filter_chain_2 = fcds_filter_chain;
+  added_filter_chain_2.mutable_filter_chain_match()->mutable_destination_port()->set_value(10003);
+
+  auto status = new_filter_chain_manager.addFilterChains(
+      GetParam() ? &matcher_ : nullptr, {added_filter_chain_1, added_filter_chain_2}, {}, nullptr,
+      filter_chain_factory_builder_, new_filter_chain_manager);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(),
+            "error applying FCDS update; duplicate filter chain name 'fcds_chain'");
+}
+
+TEST_P(FilterChainManagerImplTest, TestGetDiscoveredFilterChainsConfig) {
+  envoy::config::listener::v3::FilterChain non_fcds_filter_chain = filter_chain_template_;
+  non_fcds_filter_chain.set_name("fcds_chain");
+  non_fcds_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10001);
+
+  auto static_filter_chain = std::make_shared<Network::MockFilterChain>();
+  EXPECT_CALL(*static_filter_chain, addedByDiscovery()).WillRepeatedly(Return(false));
+  auto dynamic_filter_chain = std::make_shared<Network::MockFilterChain>();
+  EXPECT_CALL(*dynamic_filter_chain, addedByDiscovery()).WillRepeatedly(Return(true));
+  EXPECT_CALL(filter_chain_factory_builder_, buildFilterChain(_, _, _))
+      .WillOnce(Return(static_filter_chain))
+      .WillOnce(Return(dynamic_filter_chain));
+
+  EXPECT_TRUE(filter_chain_manager_
+                  ->addFilterChains(GetParam() ? &matcher_ : nullptr,
+                                    std::vector<const envoy::config::listener::v3::FilterChain*>{
+                                        &non_fcds_filter_chain},
+                                    nullptr, filter_chain_factory_builder_, *filter_chain_manager_)
+                  .ok());
+
+  FilterChainManagerImpl new_filter_chain_manager{addresses_, parent_context_, init_manager_,
+                                                  *filter_chain_manager_};
+
+  envoy::config::listener::v3::FilterChain added_filter_chain = filter_chain_template_;
+  added_filter_chain.set_name("added_fcds_chain");
+  added_filter_chain.mutable_filter_chain_match()->mutable_destination_port()->set_value(10002);
+
+  auto status = new_filter_chain_manager.addFilterChains(
+      GetParam() ? &matcher_ : nullptr, {added_filter_chain}, {}, nullptr,
+      filter_chain_factory_builder_, new_filter_chain_manager);
+
+  EXPECT_TRUE(status.ok());
+  Matchers::UniversalStringMatcher all_names_matcher;
+  auto discovered_filter_chains =
+      new_filter_chain_manager.getDiscoveredFilterChainsConfig(all_names_matcher);
+  // static filter chain should not be returned as it is not added by discovery.
+  EXPECT_EQ(discovered_filter_chains.size(), 1);
+  EXPECT_THAT(*discovered_filter_chains[0], ProtoEq(added_filter_chain));
+
+  envoy::type::matcher::v3::StringMatcher type;
+  type.set_suffix("_fcds_chain");
+  Matchers::StringMatcherImpl partial_name_matcher(type, parent_context_.server_factory_context_);
+  discovered_filter_chains =
+      new_filter_chain_manager.getDiscoveredFilterChainsConfig(partial_name_matcher);
+  EXPECT_EQ(discovered_filter_chains.size(), 1);
+  EXPECT_THAT(*discovered_filter_chains[0], ProtoEq(added_filter_chain));
+
+  type.set_suffix("_unknown");
+  Matchers::StringMatcherImpl no_name_matcher(type, parent_context_.server_factory_context_);
+  discovered_filter_chains =
+      new_filter_chain_manager.getDiscoveredFilterChainsConfig(no_name_matcher);
+  EXPECT_EQ(discovered_filter_chains.size(), 0);
 }
 
 INSTANTIATE_TEST_SUITE_P(Matcher, FilterChainManagerImplTest, ::testing::Values(true, false));

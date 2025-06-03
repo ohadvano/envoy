@@ -14,6 +14,10 @@ public:
   MOCK_METHOD(absl::StatusOr<bool>, addOrUpdateListener,
               (const envoy::config::listener::v3::Listener& config, const std::string& version_info,
                bool modifiable));
+  MOCK_METHOD(absl::Status, updateDynamicFilterChains,
+              (const std::string& listener_name, absl::optional<std::string>& version_info,
+               const FilterChainRefVector& added_filter_chains,
+               const absl::flat_hash_set<absl::string_view>& removed_filter_chains));
   MOCK_METHOD(void, createLdsApi,
               (const envoy::config::core::v3::ConfigSource& lds_config,
                const xds::core::v3::ResourceLocator*));
@@ -28,7 +32,15 @@ public:
                const Network::ExtraShutdownListenerOptions& options));
   MOCK_METHOD(void, stopWorkers, ());
   MOCK_METHOD(void, beginListenerUpdate, ());
+  MOCK_METHOD(void, beginFilterChainsUpdate, (const std::string& listener_name));
   MOCK_METHOD(void, endListenerUpdate, (ListenerManager::FailureStates&&));
+  MOCK_METHOD(void, endFilterChainsUpdate,
+              (const std::string& listener_name, absl::optional<ListenerManager::FailureState>));
+  MOCK_METHOD(OnDemandFcdsDiscoveryResult, onDemandFilterChainDiscovery,
+              (const envoy::config::core::v3::ConfigSource& config_source,
+               const std::string& listener_name, const std::string& subscription_name,
+               OnDemandFcdsDiscoveryCallbacks& callbacks, Event::Dispatcher& dispatcher,
+               const std::chrono::milliseconds& timeout));
   MOCK_METHOD(ApiListenerOptRef, apiListener, ());
   MOCK_METHOD(bool, isWorkerStarted, ());
 };

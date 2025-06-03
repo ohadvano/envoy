@@ -1,6 +1,7 @@
 #pragma once
 
 #include "envoy/network/listener.h"
+#include "envoy/server/listener_manager.h"
 
 #include "source/common/network/generic_listener_filter_impl_base.h"
 #include "source/common/quic/envoy_quic_utils.h"
@@ -80,6 +81,13 @@ public:
     return stream_info_.dynamicMetadata();
   };
   StreamInfo::FilterState& filterState() override { return *stream_info_.filterState().get(); }
+  Server::OnDemandFcdsDiscoveryResult
+  requestOnDemandFilterChainDiscovery(const envoy::config::core::v3::ConfigSource&,
+                                      const std::string&, Server::OnDemandFcdsDiscoveryCallbacks&,
+                                      const std::chrono::milliseconds&) override {
+    IS_ENVOY_BUG("Not implemented for QUIC listener filters.");
+    return {};
+  }
 
   // Network::QuicListenerFilterManager
   void addFilter(const Network::ListenerFilterMatcherSharedPtr& listener_filter_matcher,

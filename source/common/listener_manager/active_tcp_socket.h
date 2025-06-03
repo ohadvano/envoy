@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "envoy/common/time.h"
+#include "envoy/config/core/v3/config_source.pb.h"
 #include "envoy/event/deferred_deletable.h"
 #include "envoy/event/dispatcher.h"
 #include "envoy/network/filter.h"
@@ -70,6 +71,11 @@ public:
   void useOriginalDst(bool use_original_dst) override {
     hand_off_restored_destination_connections_ = use_original_dst;
   }
+  Server::OnDemandFcdsDiscoveryResult
+  requestOnDemandFilterChainDiscovery(const envoy::config::core::v3::ConfigSource& config_source,
+                                      const std::string& subscription_name,
+                                      Server::OnDemandFcdsDiscoveryCallbacks& callbacks,
+                                      const std::chrono::milliseconds& timeout) override;
 
   void startFilterChain() { continueFilterChain(true); }
 

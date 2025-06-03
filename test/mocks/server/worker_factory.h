@@ -13,7 +13,7 @@ public:
   ~MockWorkerFactory() override;
 
   // Server::WorkerFactory
-  WorkerPtr createWorker(uint32_t, OverloadManager&, OverloadManager&,
+  WorkerPtr createWorker(uint32_t, OverloadManager&, ListenerManager&, OverloadManager&,
                          const std::string&) override {
     return WorkerPtr{createWorker_()};
   }

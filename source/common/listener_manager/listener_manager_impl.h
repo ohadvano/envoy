@@ -139,6 +139,24 @@ class ListenerImpl;
 using ListenerImplPtr = std::unique_ptr<ListenerImpl>;
 
 /**
+ * Manages FCDS subscriptions for all listeners.
+ */
+class FcdsSubscriptionManager {
+public:
+  using SubscriptionPtr = FcdsApiPtr;
+  using SubscriptionMap = absl::flat_hash_map<std::string, SubscriptionPtr>;
+
+  void setSubscription(const std::string& listener_name, SubscriptionPtr&& subscription) {
+    subscriptions_[listener_name] = std::move(subscription);
+  }
+
+  void removeSubscription(const std::string& listener_name) { subscriptions_.erase(listener_name); }
+
+private:
+  SubscriptionMap subscriptions_;
+};
+
+/**
  * All listener manager stats. @see stats_macros.h
  */
 #define ALL_LISTENER_MANAGER_STATS(COUNTER, GAUGE)                                                 \
@@ -146,6 +164,7 @@ using ListenerImplPtr = std::unique_ptr<ListenerImpl>;
   COUNTER(listener_create_failure)                                                                 \
   COUNTER(listener_create_success)                                                                 \
   COUNTER(listener_in_place_updated)                                                               \
+  COUNTER(listener_dynamic_filter_chains_update)                                                   \
   COUNTER(listener_modified)                                                                       \
   COUNTER(listener_removed)                                                                        \
   COUNTER(listener_stopped)                                                                        \
@@ -217,6 +236,10 @@ public:
   absl::StatusOr<bool> addOrUpdateListener(const envoy::config::listener::v3::Listener& config,
                                            const std::string& version_info,
                                            bool added_via_api) override;
+  absl::Status updateDynamicFilterChains(
+      const std::string& listener_name, absl::optional<std::string>& version_info,
+      const FilterChainRefVector& added_filter_chains,
+      const absl::flat_hash_set<absl::string_view>& removed_filter_chains) override;
   void createLdsApi(const envoy::config::core::v3::ConfigSource& lds_config,
                     const xds::core::v3::ResourceLocator* lds_resources_locator) override {
     ASSERT(lds_api_ == nullptr);
@@ -230,13 +253,21 @@ public:
   void stopListeners(StopListenersType stop_listeners_type,
                      const Network::ExtraShutdownListenerOptions& options) override;
   void stopWorkers() override;
-  void beginListenerUpdate() override { error_state_tracker_.clear(); }
+  void beginListenerUpdate() override { lds_error_state_tracker_.clear(); }
+  void beginFilterChainsUpdate(const std::string& listener_name) override;
   void endListenerUpdate(FailureStates&& failure_state) override;
+  void endFilterChainsUpdate(const std::string& listener_name,
+                             absl::optional<FailureState> failure_state) override;
   bool isWorkerStarted() override { return workers_started_; }
+  OnDemandFcdsDiscoveryResult onDemandFilterChainDiscovery(
+      const envoy::config::core::v3::ConfigSource& config_source, const std::string& listener_name,
+      const std::string& subscription_name, OnDemandFcdsDiscoveryCallbacks& callbacks,
+      Event::Dispatcher& dispatcher, const std::chrono::milliseconds& timeout) override;
   Http::Context& httpContext() { return server_.httpContext(); }
   ApiListenerOptRef apiListener() override;
 
   Quic::QuicStatNames& quicStatNames() { return quic_stat_names_; }
+  absl::optional<uint64_t> activeListenerTagByName(const std::string& name);
 
   Instance& server_;
   std::unique_ptr<ListenerComponentFactory> factory_;
@@ -267,6 +298,7 @@ private:
                            ListenerImpl& listener, ListenerCompletionCallback completion_callback);
 
   ProtobufTypes::MessagePtr dumpListenerConfigs(const Matchers::StringMatcher& name_matcher);
+  ProtobufTypes::MessagePtr dumpFilterChainConfigs(const Matchers::StringMatcher& name_matcher);
   static ListenerManagerStats generateStats(Stats::Scope& scope);
   static bool hasListenerWithDuplicatedAddress(const ListenerList& list,
                                                const ListenerImpl& listener);
@@ -335,6 +367,7 @@ private:
   absl::Status setupSocketFactoryForListener(ListenerImpl& new_listener,
                                              const ListenerImpl& existing_listener);
 
+  FcdsSubscriptionManager fcds_subscription_manager_;
   ApiListenerPtr api_listener_;
   // Active listeners are listeners that are currently accepting new connections on the workers.
   ListenerList active_listeners_;
@@ -354,11 +387,13 @@ private:
   absl::optional<StopListenersType> stop_listeners_type_;
   Stats::ScopeSharedPtr scope_;
   ListenerManagerStats stats_;
-  ConfigTracker::EntryOwnerPtr config_tracker_entry_;
+  ConfigTracker::EntryOwnerPtr listeners_config_tracker_entry_;
+  ConfigTracker::EntryOwnerPtr filter_chains_config_tracker_entry_;
   LdsApiPtr lds_api_;
   const bool enable_dispatcher_stats_{};
   using UpdateFailureState = envoy::admin::v3::UpdateFailureState;
-  absl::flat_hash_map<std::string, std::unique_ptr<UpdateFailureState>> error_state_tracker_;
+  absl::flat_hash_map<std::string, std::unique_ptr<UpdateFailureState>> lds_error_state_tracker_;
+  absl::flat_hash_map<std::string, UpdateFailureState> fcds_error_state_tracker_;
   FailureStates overall_error_state_;
   Quic::QuicStatNames& quic_stat_names_;
   absl::flat_hash_set<uint64_t> stopped_listener_tags_;
@@ -371,12 +406,14 @@ public:
 
   absl::StatusOr<Network::DrainableFilterChainSharedPtr>
   buildFilterChain(const envoy::config::listener::v3::FilterChain& filter_chain,
-                   FilterChainFactoryContextCreator& context_creator) const override;
+                   FilterChainFactoryContextCreator& context_creator,
+                   bool added_by_fcds) const override;
 
 private:
   absl::StatusOr<Network::DrainableFilterChainSharedPtr> buildFilterChainInternal(
       const envoy::config::listener::v3::FilterChain& filter_chain,
-      Configuration::FilterChainFactoryContextPtr&& filter_chain_factory_context) const;
+      Configuration::FilterChainFactoryContextPtr&& filter_chain_factory_context,
+      bool added_by_fcds) const;
 
   ListenerImpl& listener_;
   ProtobufMessage::ValidationVisitor& validator_;

@@ -67,14 +67,42 @@ envoy::admin::v3::ListenersConfigDump::DynamicListener* getOrCreateDynamicListen
   return state;
 }
 
+// Finds and returns the DynamicFilterChain for the name provided from filter_chain_map, creating
+// and inserting one if necessary.
+envoy::admin::v3::FilterChainsConfigDump::DynamicFilterChain* getOrCreateDynamicFilterChain(
+    const std::string& name, envoy::admin::v3::FilterChainsConfigDump& dump,
+    absl::flat_hash_map<std::string, envoy::admin::v3::FilterChainsConfigDump::DynamicFilterChain*>&
+        filter_chain_map) {
+  auto it = filter_chain_map.find(name);
+  if (it != filter_chain_map.end()) {
+    return it->second;
+  }
+
+  auto* state = dump.add_dynamic_filter_chains();
+  state->set_name(name);
+  filter_chain_map.emplace(name, state);
+  return state;
+}
+
 // Given a listener, dumps the version info, update time and configuration into the
 // DynamicListenerState provided.
 void fillState(envoy::admin::v3::ListenersConfigDump::DynamicListenerState& state,
                const ListenerImpl& listener) {
   state.set_version_info(listener.versionInfo());
-  state.mutable_listener()->PackFrom(listener.config());
+  listener.dumpListenerConfig(*state.mutable_listener());
   TimestampUtil::systemClockToTimestamp(listener.last_updated_, *(state.mutable_last_updated()));
 }
+
+// Given a filter chain, dumps the version info, update time and configuration into the
+// DynamicListenerState provided.
+void fillState(envoy::admin::v3::FilterChainsConfigDump::DynamicFilterChainState& state,
+               const ListenerImpl& listener,
+               const envoy::config::listener::v3::FilterChain& filter_chain) {
+  state.set_version_info(listener.dynamicFilterChainsVersionInfo());
+  state.mutable_filter_chain()->PackFrom(filter_chain);
+  TimestampUtil::systemClockToTimestamp(listener.last_updated_, *(state.mutable_last_updated()));
+}
+
 } // namespace
 
 absl::StatusOr<Filter::NetworkFilterFactoriesList>
@@ -362,15 +390,20 @@ ListenerManagerImpl::ListenerManagerImpl(Instance& server,
     factory_ = std::make_unique<ProdListenerComponentFactory>(server);
   }
   if (server.admin().has_value()) {
-    config_tracker_entry_ = server.admin()->getConfigTracker().add(
+    listeners_config_tracker_entry_ = server.admin()->getConfigTracker().add(
         "listeners", [this](const Matchers::StringMatcher& name_matcher) {
           return dumpListenerConfigs(name_matcher);
+        });
+    filter_chains_config_tracker_entry_ = server.admin()->getConfigTracker().add(
+        "filter_chains", [this](const Matchers::StringMatcher& name_matcher) {
+          return dumpFilterChainConfigs(name_matcher);
         });
   }
 
   for (uint32_t i = 0; i < server.options().concurrency(); i++) {
-    workers_.emplace_back(worker_factory.createWorker(
-        i, server.overloadManager(), server.nullOverloadManager(), absl::StrCat("worker_", i)));
+    workers_.emplace_back(worker_factory.createWorker(i, server.overloadManager(), *this,
+                                                      server.nullOverloadManager(),
+                                                      absl::StrCat("worker_", i)));
   }
 }
 
@@ -384,12 +417,12 @@ ListenerManagerImpl::dumpListenerConfigs(const Matchers::StringMatcher& name_mat
   absl::flat_hash_map<std::string, DynamicListener*> listener_map;
 
   for (const auto& listener : active_listeners_) {
-    if (!name_matcher.match(listener->config().name())) {
+    if (!name_matcher.match(listener->configName())) {
       continue;
     }
     if (listener->blockRemove()) {
       auto& static_listener = *config_dump->mutable_static_listeners()->Add();
-      static_listener.mutable_listener()->PackFrom(listener->config());
+      listener->dumpListenerConfig(*static_listener.mutable_listener());
       TimestampUtil::systemClockToTimestamp(listener->last_updated_,
                                             *(static_listener.mutable_last_updated()));
       continue;
@@ -411,7 +444,7 @@ ListenerManagerImpl::dumpListenerConfigs(const Matchers::StringMatcher& name_mat
   }
 
   for (const auto& listener : warming_listeners_) {
-    if (!name_matcher.match(listener->config().name())) {
+    if (!name_matcher.match(listener->configName())) {
       continue;
     }
     DynamicListener* dynamic_listener =
@@ -421,7 +454,7 @@ ListenerManagerImpl::dumpListenerConfigs(const Matchers::StringMatcher& name_mat
   }
 
   for (const auto& draining_listener : draining_listeners_) {
-    if (!name_matcher.match(draining_listener.listener_->config().name())) {
+    if (!name_matcher.match(draining_listener.listener_->configName())) {
       continue;
     }
     const auto& listener = draining_listener.listener_;
@@ -431,7 +464,7 @@ ListenerManagerImpl::dumpListenerConfigs(const Matchers::StringMatcher& name_mat
     fillState(*dump_listener, *listener);
   }
 
-  for (const auto& [error_name, error_state] : error_state_tracker_) {
+  for (const auto& [error_name, error_state] : lds_error_state_tracker_) {
     DynamicListener* dynamic_listener =
         getOrCreateDynamicListener(error_name, *config_dump, listener_map);
 
@@ -445,6 +478,90 @@ ListenerManagerImpl::dumpListenerConfigs(const Matchers::StringMatcher& name_mat
   }
 
   return config_dump;
+}
+
+ProtobufTypes::MessagePtr
+ListenerManagerImpl::dumpFilterChainConfigs(const Matchers::StringMatcher& name_matcher) {
+  auto config_dump = std::make_unique<envoy::admin::v3::FilterChainsConfigDump>();
+
+  using DynamicFilterChain = envoy::admin::v3::FilterChainsConfigDump::DynamicFilterChain;
+  using DynamicFilterChainState = envoy::admin::v3::FilterChainsConfigDump::DynamicFilterChainState;
+  absl::flat_hash_map<std::string, DynamicFilterChain*> filter_chains_map;
+
+  for (const auto& listener : active_listeners_) {
+    auto filter_chains = listener->getDiscoveredFilterChainsConfig(name_matcher);
+    for (const auto& filter_chain : filter_chains) {
+      DynamicFilterChain* dynamic_filter_chain =
+          getOrCreateDynamicFilterChain(filter_chain->name(), *config_dump, filter_chains_map);
+
+      // To avoid confusion in config dump, during server warm up, filter chains in warming
+      // listeners will show as in warming state even though they are stored in the
+      // active_listeners_ list.
+      DynamicFilterChainState* dump_filter_chain;
+      if (workers_started_) {
+        dump_filter_chain = dynamic_filter_chain->mutable_active_state();
+      } else {
+        dump_filter_chain = dynamic_filter_chain->mutable_warming_state();
+      }
+
+      fillState(*dump_filter_chain, *listener, *filter_chain);
+    }
+  }
+
+  for (const auto& listener : warming_listeners_) {
+    auto filter_chains = listener->getDiscoveredFilterChainsConfig(name_matcher);
+    for (const auto& filter_chain : filter_chains) {
+      DynamicFilterChain* dynamic_filter_chain =
+          getOrCreateDynamicFilterChain(filter_chain->name(), *config_dump, filter_chains_map);
+
+      DynamicFilterChainState* dump_filter_chain = dynamic_filter_chain->mutable_warming_state();
+      fillState(*dump_filter_chain, *listener, *filter_chain);
+    }
+  }
+
+  for (const auto& draining_listener : draining_listeners_) {
+    const auto& listener = draining_listener.listener_;
+    auto filter_chains = listener->getDiscoveredFilterChainsConfig(name_matcher);
+    for (const auto& filter_chain : filter_chains) {
+      DynamicFilterChain* dynamic_filter_chain =
+          getOrCreateDynamicFilterChain(filter_chain->name(), *config_dump, filter_chains_map);
+
+      DynamicFilterChainState* dump_filter_chain = dynamic_filter_chain->mutable_draining_state();
+      fillState(*dump_filter_chain, *listener, *filter_chain);
+    }
+  }
+
+  for (const auto& [_, failure_state] : fcds_error_state_tracker_) {
+    config_dump->add_dynamic_filter_chains()->mutable_error_state()->CopyFrom(failure_state);
+  }
+
+  return config_dump;
+}
+
+void ListenerManagerImpl::beginFilterChainsUpdate(const std::string& listener_name) {
+  fcds_error_state_tracker_.erase(listener_name);
+}
+
+void ListenerManagerImpl::endFilterChainsUpdate(const std::string& listener_name,
+                                                absl::optional<FailureState> failure_state) {
+  if (!failure_state.has_value()) {
+    return;
+  }
+
+  fcds_error_state_tracker_[listener_name] = failure_state.value();
+}
+
+OnDemandFcdsDiscoveryResult ListenerManagerImpl::onDemandFilterChainDiscovery(
+    const envoy::config::core::v3::ConfigSource& config_source, const std::string& listener_name,
+    const std::string& subscription_name, OnDemandFcdsDiscoveryCallbacks& callbacks,
+    Event::Dispatcher& dispatcher, const std::chrono::milliseconds& timeout) {
+  UNREFERENCED_PARAMETER(config_source);
+  UNREFERENCED_PARAMETER(listener_name);
+  UNREFERENCED_PARAMETER(subscription_name);
+  UNREFERENCED_PARAMETER(callbacks);
+  UNREFERENCED_PARAMETER(dispatcher);
+  UNREFERENCED_PARAMETER(timeout);
+  return {};
 }
 
 ListenerManagerStats ListenerManagerImpl::generateStats(Stats::Scope& scope) {
@@ -490,7 +607,7 @@ ListenerManagerImpl::addOrUpdateListener(const envoy::config::listener::v3::List
         fmt::format("error adding listener named '{}': address is necessary", name));
   }
 
-  auto it = error_state_tracker_.find(name);
+  auto it = lds_error_state_tracker_.find(name);
   absl::StatusOr<bool> add_or_update_status;
   TRY_ASSERT_MAIN_THREAD {
     add_or_update_status = addOrUpdateListenerInternal(config, version_info, added_via_api, name);
@@ -498,8 +615,8 @@ ListenerManagerImpl::addOrUpdateListener(const envoy::config::listener::v3::List
   END_TRY
   CATCH(const EnvoyException& e, { add_or_update_status = absl::InvalidArgumentError(e.what()); })
   if (!add_or_update_status.status().ok()) {
-    if (it == error_state_tracker_.end()) {
-      it = error_state_tracker_.emplace(name, std::make_unique<UpdateFailureState>()).first;
+    if (it == lds_error_state_tracker_.end()) {
+      it = lds_error_state_tracker_.emplace(name, std::make_unique<UpdateFailureState>()).first;
     }
     TimestampUtil::systemClockToTimestamp(server_.api().timeSource().systemTime(),
                                           *(it->second->mutable_last_update_attempt()));
@@ -507,6 +624,62 @@ ListenerManagerImpl::addOrUpdateListener(const envoy::config::listener::v3::List
     it->second->mutable_failed_configuration()->PackFrom(config);
   }
   return add_or_update_status;
+}
+
+absl::Status ListenerManagerImpl::updateDynamicFilterChains(
+    const std::string& listener_name, absl::optional<std::string>& version_info,
+    const FilterChainRefVector& added_filter_chains,
+    const absl::flat_hash_set<absl::string_view>& removed_filter_chains) {
+  ENVOY_LOG(debug, "begin update of listener {} filter chains", listener_name);
+
+  auto existing_active_listener = getListenerByName(active_listeners_, listener_name);
+  auto existing_warming_listener = getListenerByName(warming_listeners_, listener_name);
+
+  // The filter chain update needs to be based on the current warming listener if it exists.
+  // Otherwise, it needs to be based on the current active listener.
+  ListenerManagerImpl::ListenerList::iterator baseline_listener;
+  if (existing_warming_listener != warming_listeners_.end()) {
+    baseline_listener = existing_warming_listener;
+  } else if (existing_active_listener != active_listeners_.end()) {
+    baseline_listener = existing_active_listener;
+  } else {
+    IS_ENVOY_BUG(
+        fmt::format("FCDS subscription should have been removed for listener {}", listener_name));
+  }
+
+  ListenerImplPtr new_listener;
+  auto listener_or_error =
+      (*baseline_listener)
+          ->newListenerWithFilterChain(version_info, added_filter_chains, removed_filter_chains,
+                                       workers_started_);
+  RETURN_IF_NOT_OK_REF(listener_or_error.status());
+  new_listener = std::move(*listener_or_error);
+  ListenerImpl& new_listener_ref = *new_listener;
+
+  if (existing_warming_listener != warming_listeners_.end()) {
+    ASSERT(workers_started_);
+    new_listener->debugLog("update warming listener");
+    RETURN_IF_NOT_OK(setupSocketFactoryForListener(*new_listener, **existing_warming_listener));
+    // In this case we can just replace inline.
+    *existing_warming_listener = std::move(new_listener);
+  } else if (existing_active_listener != active_listeners_.end()) {
+    RETURN_IF_NOT_OK(setupSocketFactoryForListener(*new_listener, **existing_active_listener));
+    // In this case we have no warming listener, so what we do depends on whether workers
+    // have been started or not.
+    if (workers_started_) {
+      new_listener->debugLog("add warming listener");
+      warming_listeners_.emplace_back(std::move(new_listener));
+    } else {
+      new_listener->debugLog("update active listener");
+      *existing_active_listener = std::move(new_listener);
+    }
+  }
+
+  stats_.listener_dynamic_filter_chains_update_.inc();
+  updateWarmingActiveGauges();
+  stats_.listener_modified_.inc();
+  new_listener_ref.initialize();
+  return absl::OkStatus();
 }
 
 absl::Status
@@ -547,7 +720,7 @@ absl::StatusOr<bool> ListenerManagerImpl::addOrUpdateListenerInternal(
   // removed.
   if (existing_warming_listener != warming_listeners_.end() &&
       existing_active_listener != active_listeners_.end() &&
-      (*existing_active_listener)->blockUpdate(hash)) {
+      (*existing_active_listener)->blockLdsUpdate(hash)) {
     warming_listeners_.erase(existing_warming_listener);
     updateWarmingActiveGauges();
     stats_.listener_modified_.inc();
@@ -557,14 +730,15 @@ absl::StatusOr<bool> ListenerManagerImpl::addOrUpdateListenerInternal(
   // Do a quick blocked update check before going further. This check needs to be done against both
   // warming and active.
   if ((existing_warming_listener != warming_listeners_.end() &&
-       (*existing_warming_listener)->blockUpdate(hash)) ||
+       (*existing_warming_listener)->blockLdsUpdate(hash)) ||
       (existing_active_listener != active_listeners_.end() &&
-       (*existing_active_listener)->blockUpdate(hash))) {
+       (*existing_active_listener)->blockLdsUpdate(hash))) {
     ENVOY_LOG(debug, "duplicate/locked listener '{}'. no add/update", name);
     return false;
   }
 
   ListenerImplPtr new_listener = nullptr;
+  FcdsApiPtr fcds_subscription;
 
   // In place filter chain update depends on the active listener at worker.
   if (existing_active_listener != active_listeners_.end() &&
@@ -582,6 +756,11 @@ absl::StatusOr<bool> ListenerManagerImpl::addOrUpdateListenerInternal(
                                                   workers_started_, hash);
     RETURN_IF_NOT_OK_REF(listener_or_error.status());
     new_listener = std::move(*listener_or_error);
+    if (config.has_fcds_config()) {
+      fcds_subscription = new_listener->createFcdsSubscription(config.fcds_config());
+    }
+
+    new_listener->maybeAddListenerInitTarget();
   }
 
   ListenerImpl& new_listener_ref = *new_listener;
@@ -624,6 +803,14 @@ absl::StatusOr<bool> ListenerManagerImpl::addOrUpdateListenerInternal(
     stats_.listener_added_.inc();
   } else {
     stats_.listener_modified_.inc();
+  }
+
+  if (fcds_subscription) {
+    ENVOY_LOG(debug, "creating filter chain discovery for listener {}", name);
+
+    // Retaining the filter chain discovery subscription only at this point since the listener
+    // creation can fail in previous steps.
+    fcds_subscription_manager_.setSubscription(name, std::move(fcds_subscription));
   }
 
   new_listener_ref.initialize();
@@ -918,6 +1105,8 @@ bool ListenerManagerImpl::removeListenerInternal(const std::string& name,
     return false;
   }
 
+  fcds_subscription_manager_.removeSubscription(name);
+
   // Destroy a warming listener directly.
   if (existing_warming_listener != warming_listeners_.end()) {
     (*existing_warming_listener)->debugLog("removing warming listener");
@@ -1073,15 +1262,16 @@ ListenerFilterChainFactoryBuilder::ListenerFilterChainFactoryBuilder(
 absl::StatusOr<Network::DrainableFilterChainSharedPtr>
 ListenerFilterChainFactoryBuilder::buildFilterChain(
     const envoy::config::listener::v3::FilterChain& filter_chain,
-    FilterChainFactoryContextCreator& context_creator) const {
-  return buildFilterChainInternal(filter_chain,
-                                  context_creator.createFilterChainFactoryContext(&filter_chain));
+    FilterChainFactoryContextCreator& context_creator, bool added_by_fcds) const {
+  return buildFilterChainInternal(
+      filter_chain, context_creator.createFilterChainFactoryContext(&filter_chain), added_by_fcds);
 }
 
 absl::StatusOr<Network::DrainableFilterChainSharedPtr>
 ListenerFilterChainFactoryBuilder::buildFilterChainInternal(
     const envoy::config::listener::v3::FilterChain& filter_chain,
-    Configuration::FilterChainFactoryContextPtr&& filter_chain_factory_context) const {
+    Configuration::FilterChainFactoryContextPtr&& filter_chain_factory_context,
+    bool added_by_fcds) const {
   // If the cluster doesn't have transport socket configured, then use the default "raw_buffer"
   // transport socket or BoringSSL-based "tls" transport socket if TLS settings are configured.
   // We copy by value first then override if necessary.
@@ -1140,7 +1330,7 @@ ListenerFilterChainFactoryBuilder::buildFilterChainInternal(
       std::move(factory_or_error.value()), std::move(*factory_list_or_error),
       std::chrono::milliseconds(
           PROTOBUF_GET_MS_OR_DEFAULT(filter_chain, transport_socket_connect_timeout, 0)),
-      filter_chain.name());
+      filter_chain.name(), added_by_fcds);
 
   filter_chain_res->setFilterChainFactoryContext(std::move(filter_chain_factory_context));
   return filter_chain_res;
@@ -1267,6 +1457,16 @@ void ListenerManagerImpl::maybeCloseSocketsForListener(ListenerImpl& listener) {
 
 ApiListenerOptRef ListenerManagerImpl::apiListener() {
   return api_listener_ ? ApiListenerOptRef(std::ref(*api_listener_)) : absl::nullopt;
+}
+
+absl::optional<uint64_t> ListenerManagerImpl::activeListenerTagByName(const std::string& name) {
+  auto existing_active_listener = getListenerByName(active_listeners_, name);
+  if (existing_active_listener == active_listeners_.end()) {
+    return absl::nullopt;
+  }
+
+  RELEASE_ASSERT(*existing_active_listener != nullptr, "listener is null");
+  return (*existing_active_listener)->listenerTag();
 }
 
 REGISTER_FACTORY(DefaultListenerManagerFactoryImpl, ListenerManagerFactory);

@@ -17,6 +17,7 @@
 #include "envoy/network/resolver.h"
 #include "envoy/network/socket.h"
 #include "envoy/network/transport_socket.h"
+#include "envoy/server/listener_manager.h"
 #include "envoy/stats/scope.h"
 
 #include "source/common/network/dns_resolver/dns_factory_util.h"
@@ -334,6 +335,7 @@ public:
   MOCK_METHOD(const NetworkFilterFactoriesList&, networkFilterFactories, (), (const));
   MOCK_METHOD(void, startDraining, ());
   MOCK_METHOD(absl::string_view, name, (), (const));
+  MOCK_METHOD(bool, addedByDiscovery, (), (const));
 };
 
 class MockFilterChainInfo : public FilterChainInfo {
@@ -440,6 +442,9 @@ public:
   MOCK_METHOD(const envoy::config::core::v3::Metadata&, dynamicMetadata, (), (const));
   MOCK_METHOD(StreamInfo::FilterState&, filterState, (), ());
   MOCK_METHOD(void, useOriginalDst, (bool));
+  MOCK_METHOD(Server::OnDemandFcdsDiscoveryResult, requestOnDemandFilterChainDiscovery,
+              (const envoy::config::core::v3::ConfigSource&, const std::string&,
+               Server::OnDemandFcdsDiscoveryCallbacks&, const std::chrono::milliseconds&));
 
   StreamInfo::FilterStateImpl filter_state_;
   NiceMock<MockConnectionSocket> socket_;
@@ -564,6 +569,7 @@ public:
   MOCK_METHOD(void, disableListeners, ());
   MOCK_METHOD(void, enableListeners, ());
   MOCK_METHOD(void, setListenerRejectFraction, (UnitFloat), (override));
+  MOCK_METHOD(Server::ListenerManager&, listenerManager, ());
   MOCK_METHOD(const std::string&, statPrefix, (), (const));
 
   uint64_t num_handler_connections_{};

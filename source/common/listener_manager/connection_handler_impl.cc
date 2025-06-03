@@ -24,10 +24,11 @@ ConnectionHandlerImpl::ConnectionHandlerImpl(Event::Dispatcher& dispatcher,
 
 ConnectionHandlerImpl::ConnectionHandlerImpl(Event::Dispatcher& dispatcher,
                                              absl::optional<uint32_t> worker_index,
+                                             ListenerManager& listener_manager,
                                              OverloadManager& overload_manager,
                                              OverloadManager& null_overload_manager)
-    : worker_index_(worker_index), dispatcher_(dispatcher), overload_manager_(overload_manager),
-      null_overload_manager_(null_overload_manager),
+    : worker_index_(worker_index), dispatcher_(dispatcher), listener_manager_(listener_manager),
+      overload_manager_(overload_manager), null_overload_manager_(null_overload_manager),
       per_handler_stat_prefix_(dispatcher.name() + "."), disable_listeners_(false) {}
 
 void ConnectionHandlerImpl::incNumConnections() { ++num_handler_connections_; }
